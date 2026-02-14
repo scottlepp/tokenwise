@@ -1,5 +1,5 @@
 {
-  "name": "claude-wrapper",
+  "name": "claude-proxy",
   "version": "0.1.0",
   "private": true,
   "scripts": {

@@ -44,7 +44,7 @@ Browser ── GET /dashboard ──────────►  Analytics UI (s
 ## Project Structure
 
 ```
-claude-wrapper/
+claude-proxy/
 ├── docker-compose.yml                          # PostgreSQL
 ├── drizzle.config.ts                           # Drizzle migrations config
 ├── package.json
