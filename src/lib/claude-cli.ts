@@ -4,6 +4,36 @@ import type { ClaudeModel } from "./types";
 
 const LONG_PROMPT_THRESHOLD = 100_000; // bytes
 
+/** Extract accurate token counts and cost from the CLI result event's modelUsage field */
+function extractModelUsage(resultEvent: Record<string, unknown>): {
+  tokensIn: number;
+  tokensOut: number;
+  costUsd: number;
+} {
+  // modelUsage has per-model breakdown with accurate totals
+  const modelUsage = resultEvent.modelUsage as Record<string, Record<string, number>> | undefined;
+  if (modelUsage) {
+    let tokensIn = 0;
+    let tokensOut = 0;
+    let costUsd = 0;
+    for (const model of Object.values(modelUsage)) {
+      tokensIn += (model.inputTokens ?? 0) + (model.cacheReadInputTokens ?? 0) + (model.cacheCreationInputTokens ?? 0);
+      tokensOut += model.outputTokens ?? 0;
+      costUsd += model.costUSD ?? 0;
+    }
+    return { tokensIn, tokensOut, costUsd };
+  }
+
+  // Fallback: use total_cost_usd + basic usage fields
+  const usage = resultEvent.usage as Record<string, number> | undefined;
+  const totalCost = resultEvent.total_cost_usd as number | undefined;
+  return {
+    tokensIn: (usage?.input_tokens ?? 0) + (usage?.cache_creation_input_tokens ?? 0) + (usage?.cache_read_input_tokens ?? 0),
+    tokensOut: usage?.output_tokens ?? 0,
+    costUsd: totalCost ?? 0,
+  };
+}
+
 interface CliOptions {
   model: ClaudeModel;
   prompt: string;
@@ -34,6 +64,7 @@ export interface NonStreamingResult {
   text: string;
   tokensIn: number;
   tokensOut: number;
+  costUsd: number;
   isError: boolean;
   errorMessage?: string;
 }
@@ -75,6 +106,7 @@ export function spawnClaudeNonStreaming(options: CliOptions): Promise<NonStreami
           text: "",
           tokensIn: 0,
           tokensOut: 0,
+          costUsd: 0,
           isError: true,
           errorMessage: stderr || `claude CLI exited with code ${code}`,
         });
@@ -120,27 +152,27 @@ export function spawnClaudeNonStreaming(options: CliOptions): Promise<NonStreami
             text: stdout.trim(),
             tokensIn: 0,
             tokensOut: 0,
+            costUsd: 0,
             isError: false,
           });
           return;
         }
 
+        const extracted = extractModelUsage(resultEvent);
+
         if (resultEvent.is_error) {
           resolve({
             text: (resultEvent.result as string) ?? "",
-            tokensIn: (resultEvent.usage as Record<string, number>)?.input_tokens ?? 0,
-            tokensOut: (resultEvent.usage as Record<string, number>)?.output_tokens ?? 0,
+            ...extracted,
             isError: true,
             errorMessage: (resultEvent.result as string) ?? "Unknown CLI error",
           });
           return;
         }
 
-        const usage = resultEvent.usage as Record<string, number> | undefined;
         resolve({
           text: (resultEvent.result as string) ?? "",
-          tokensIn: usage?.input_tokens ?? 0,
-          tokensOut: usage?.output_tokens ?? 0,
+          ...extracted,
           isError: false,
         });
       } catch {
@@ -148,6 +180,7 @@ export function spawnClaudeNonStreaming(options: CliOptions): Promise<NonStreami
           text: stdout.trim(),
           tokensIn: 0,
           tokensOut: 0,
+          costUsd: 0,
           isError: false,
         });
       }

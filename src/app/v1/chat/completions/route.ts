@@ -4,7 +4,7 @@ import { spawnClaudeNonStreaming, spawnClaudeStreaming } from "@/lib/claude-cli"
 import { createStreamTransformer } from "@/lib/stream-transformer";
 import { selectModel } from "@/lib/router";
 import { evaluate } from "@/lib/success-evaluator";
-import { calculateCost, modelAlias } from "@/lib/config";
+import { modelAlias } from "@/lib/config";
 import { insertTaskLog, updateUserRating, getMostRecentTaskId, findTaskByPartialId } from "@/lib/db/queries";
 import { getCacheKey, getDedupKey, getFromCache, setInCache, isDuplicate, markDedup } from "@/lib/cache";
 import { compress } from "@/lib/compressor";
@@ -232,21 +232,20 @@ export async function POST(request: NextRequest) {
       },
     });
 
-    let resolveAccumulated: (value: { text: string; tokensIn: number; tokensOut: number }) => void;
-    const accumulatedPromise = new Promise<{ text: string; tokensIn: number; tokensOut: number }>((resolve) => {
+    let resolveAccumulated: (value: { text: string; tokensIn: number; tokensOut: number; costUsd: number }) => void;
+    const accumulatedPromise = new Promise<{ text: string; tokensIn: number; tokensOut: number; costUsd: number }>((resolve) => {
       resolveAccumulated = resolve;
     });
 
-    const transformer = createStreamTransformer(completionId, decision.alias, (acc) => {
+    const transformer = createStreamTransformer(completionId, requestModel, (acc) => {
       resolveAccumulated!(acc);
-    });
+    }, { includeUsage: body.stream_options?.include_usage !== false });
 
     const outputStream = nodeToWeb.pipeThrough(transformer);
 
     // Log asynchronously after stream completes
     accumulatedPromise.then(async (acc) => {
       const latencyMs = Date.now() - startTime;
-      const cost = calculateCost(decision.model, acc.tokensIn, acc.tokensOut);
       const evalResult = evaluate(acc.text, true, category, complexityScore);
 
       try {
@@ -260,7 +259,7 @@ export async function POST(request: NextRequest) {
           routerReason: decision.reason,
           tokensIn: acc.tokensIn,
           tokensOut: acc.tokensOut,
-          costUsd: cost.toFixed(6),
+          costUsd: acc.costUsd.toFixed(6),
           latencyMs,
           streaming: true,
           cliSuccess: evalResult.cliSuccess,
@@ -295,7 +294,6 @@ export async function POST(request: NextRequest) {
     });
 
     const latencyMs = Date.now() - startTime;
-    const cost = calculateCost(decision.model, result.tokensIn, result.tokensOut);
     const evalResult = evaluate(result.text, !result.isError, category, complexityScore);
 
     // Log to DB
@@ -311,7 +309,7 @@ export async function POST(request: NextRequest) {
         routerReason: decision.reason,
         tokensIn: result.tokensIn,
         tokensOut: result.tokensOut,
-        costUsd: cost.toFixed(6),
+        costUsd: result.costUsd.toFixed(6),
         latencyMs,
         streaming: false,
         cliSuccess: !result.isError,
@@ -337,7 +335,7 @@ export async function POST(request: NextRequest) {
       id: completionId,
       object: "chat.completion",
       created: Math.floor(Date.now() / 1000),
-      model: decision.alias,
+      model: requestModel,
       choices: [
         {
           index: 0,

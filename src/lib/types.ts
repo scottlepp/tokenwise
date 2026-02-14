@@ -31,6 +31,7 @@ export interface ChatCompletionRequest {
   model: string;
   messages: ChatMessage[];
   stream?: boolean;
+  stream_options?: { include_usage?: boolean };
   temperature?: number;
   max_tokens?: number;
   stop?: string | string[];
@@ -75,6 +76,11 @@ export interface ChatCompletionChunk {
   created: number;
   model: string;
   choices: ChatCompletionChunkChoice[];
+  usage?: {
+    prompt_tokens: number;
+    completion_tokens: number;
+    total_tokens: number;
+  } | null;
 }
 
 export interface RouterDecision {

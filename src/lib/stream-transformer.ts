@@ -4,31 +4,39 @@ export interface StreamAccumulator {
   text: string;
   tokensIn: number;
   tokensOut: number;
+  costUsd: number;
 }
 
 export function createStreamTransformer(
   completionId: string,
   model: string,
-  onDone: (accumulated: StreamAccumulator) => void
+  onDone: (accumulated: StreamAccumulator) => void,
+  options?: { includeUsage?: boolean }
 ): TransformStream<Uint8Array, Uint8Array> {
   const encoder = new TextEncoder();
   const decoder = new TextDecoder();
   let buffer = "";
-  const accumulated: StreamAccumulator = { text: "", tokensIn: 0, tokensOut: 0 };
+  const accumulated: StreamAccumulator = { text: "", tokensIn: 0, tokensOut: 0, costUsd: 0 };
   const created = Math.floor(Date.now() / 1000);
   let sentRole = false;
+  let sentStop = false;
 
   function emit(
     controller: TransformStreamDefaultController<Uint8Array>,
     delta: Record<string, unknown>,
-    finishReason: string | null,
+    finishReason: "stop" | "length" | null,
+    usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number } | null,
   ) {
+    if (finishReason === "stop" && sentStop) return;
+    if (finishReason === "stop") sentStop = true;
+
     const chunk: ChatCompletionChunk = {
       id: completionId,
       object: "chat.completion.chunk",
       created,
       model,
       choices: [{ index: 0, delta, finish_reason: finishReason }],
+      ...(usage ? { usage } : {}),
     };
     controller.enqueue(encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`));
   }
@@ -75,10 +83,28 @@ export function createStreamTransformer(
         accumulated.tokensOut = usage.output_tokens ?? 0;
       }
     } else if (type === "result") {
-      const usage = event.usage as Record<string, number> | undefined;
-      if (usage) {
-        accumulated.tokensIn = usage.input_tokens ?? accumulated.tokensIn;
-        accumulated.tokensOut = usage.output_tokens ?? accumulated.tokensOut;
+      // Prefer modelUsage for accurate token counts (includes cache tokens)
+      const modelUsage = event.modelUsage as Record<string, Record<string, number>> | undefined;
+      if (modelUsage) {
+        let tokensIn = 0;
+        let tokensOut = 0;
+        let costUsd = 0;
+        for (const model of Object.values(modelUsage)) {
+          tokensIn += (model.inputTokens ?? 0) + (model.cacheReadInputTokens ?? 0) + (model.cacheCreationInputTokens ?? 0);
+          tokensOut += model.outputTokens ?? 0;
+          costUsd += model.costUSD ?? 0;
+        }
+        accumulated.tokensIn = tokensIn;
+        accumulated.tokensOut = tokensOut;
+        accumulated.costUsd = costUsd;
+      } else {
+        // Fallback to basic usage fields
+        const usage = event.usage as Record<string, number> | undefined;
+        if (usage) {
+          accumulated.tokensIn = (usage.input_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0) + (usage.cache_read_input_tokens ?? 0);
+          accumulated.tokensOut = usage.output_tokens ?? accumulated.tokensOut;
+        }
+        accumulated.costUsd = (event.total_cost_usd as number) ?? 0;
       }
 
       // Fallback: if assistant event didn't provide content, use result text
@@ -88,7 +114,12 @@ export function createStreamTransformer(
         emit(controller, { content: event.result }, null);
       }
 
-      emit(controller, {}, "stop");
+      const usage = options?.includeUsage !== false ? {
+        prompt_tokens: accumulated.tokensIn,
+        completion_tokens: accumulated.tokensOut,
+        total_tokens: accumulated.tokensIn + accumulated.tokensOut,
+      } : undefined;
+      emit(controller, {}, "stop", usage);
 
     // --- Raw Anthropic API format (compatibility) ---
     } else if (type === "message_start") {
