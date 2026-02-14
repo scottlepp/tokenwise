@@ -81,12 +81,16 @@ async function handleFeedback(
 }
 
 export async function POST(request: NextRequest) {
+  console.log("[completions] Incoming request from", request.headers.get("user-agent"));
+
   let body: ChatCompletionRequest;
   try {
     body = await request.json();
   } catch {
     return errorResponse("Invalid JSON body", "invalid_json", 400);
   }
+
+  console.log("[completions] model=%s stream=%s messages=%d", body.model, body.stream, body.messages?.length ?? 0);
 
   if (!body.messages || !Array.isArray(body.messages) || body.messages.length === 0) {
     return errorResponse("messages array is required and must not be empty", "invalid_messages", 400);
@@ -150,7 +154,7 @@ export async function POST(request: NextRequest) {
       ...decision,
       model: downgraded,
       alias: modelAlias(downgraded),
-      reason: `${decision.reason} → downgraded due to budget (${budgetResult.reason})`,
+      reason: `${decision.reason} -> downgraded due to budget (${budgetResult.reason})`,
     };
   }
 

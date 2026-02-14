@@ -129,7 +129,7 @@ export async function selectModel(
     decision: {
       model,
       alias: modelAlias(model),
-      reason: `Complexity score ${complexityScore} → ${modelAlias(model)} (tier-based, no history)`,
+      reason: `Complexity score ${complexityScore} -> ${modelAlias(model)} (tier-based, no history)`,
     },
     category,
     complexityScore,
