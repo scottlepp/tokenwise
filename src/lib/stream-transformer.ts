@@ -1,4 +1,5 @@
 import type { ChatCompletionChunk } from "./types";
+import { parseToolCalls } from "./tool-parser";
 
 export interface StreamAccumulator {
   text: string;
@@ -11,7 +12,7 @@ export function createStreamTransformer(
   completionId: string,
   model: string,
   onDone: (accumulated: StreamAccumulator) => void,
-  options?: { includeUsage?: boolean }
+  options?: { includeUsage?: boolean; hasTools?: boolean }
 ): TransformStream<Uint8Array, Uint8Array> {
   const encoder = new TextEncoder();
   const decoder = new TextDecoder();
@@ -20,15 +21,16 @@ export function createStreamTransformer(
   const created = Math.floor(Date.now() / 1000);
   let sentRole = false;
   let sentStop = false;
+  let gotResult = false;
 
   function emit(
     controller: TransformStreamDefaultController<Uint8Array>,
     delta: Record<string, unknown>,
-    finishReason: "stop" | "length" | null,
+    finishReason: "stop" | "length" | "tool_calls" | null,
     usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number } | null,
   ) {
-    if (finishReason === "stop" && sentStop) return;
-    if (finishReason === "stop") sentStop = true;
+    if ((finishReason === "stop" || finishReason === "tool_calls") && sentStop) return;
+    if (finishReason === "stop" || finishReason === "tool_calls") sentStop = true;
 
     const chunk: ChatCompletionChunk = {
       id: completionId,
@@ -48,13 +50,26 @@ export function createStreamTransformer(
     }
   }
 
+  // Track how much text we've already streamed to the client
+  let streamedTextLength = 0;
+
+  /**
+   * Stream text content to client in real-time.
+   * When tools are present, we still stream text so the user sees progress,
+   * but we also accumulate it. At flush, we'll parse for tool calls and
+   * only emit tool_call chunks (text was already sent).
+   */
+  function streamText(controller: TransformStreamDefaultController<Uint8Array>, text: string) {
+    emitRole(controller);
+    const chunkSize = 20;
+    for (let i = 0; i < text.length; i += chunkSize) {
+      emit(controller, { content: text.slice(i, i + chunkSize) }, null);
+    }
+    streamedTextLength += text.length;
+  }
+
   function handle(event: Record<string, unknown>, controller: TransformStreamDefaultController<Uint8Array>) {
     const type = event.type as string | undefined;
-
-    // --- Claude CLI stream-json format ---
-    // { type: "system", ... }
-    // { type: "assistant", message: { content: [{ type: "text", text: "..." }], usage: {...} } }
-    // { type: "result", result: "...", usage: {...} }
 
     if (type === "assistant") {
       const message = event.message as Record<string, unknown> | undefined;
@@ -67,12 +82,7 @@ export function createStreamTransformer(
         for (const block of content) {
           if (block.type === "text" && typeof block.text === "string") {
             accumulated.text += block.text;
-            // Stream in small chunks
-            const text = block.text;
-            const chunkSize = 20;
-            for (let i = 0; i < text.length; i += chunkSize) {
-              emit(controller, { content: text.slice(i, i + chunkSize) }, null);
-            }
+            streamText(controller, block.text);
           }
         }
       }
@@ -83,22 +93,21 @@ export function createStreamTransformer(
         accumulated.tokensOut = usage.output_tokens ?? 0;
       }
     } else if (type === "result") {
-      // Prefer modelUsage for accurate token counts (includes cache tokens)
+      gotResult = true;
       const modelUsage = event.modelUsage as Record<string, Record<string, number>> | undefined;
       if (modelUsage) {
         let tokensIn = 0;
         let tokensOut = 0;
         let costUsd = 0;
-        for (const model of Object.values(modelUsage)) {
-          tokensIn += (model.inputTokens ?? 0) + (model.cacheReadInputTokens ?? 0) + (model.cacheCreationInputTokens ?? 0);
-          tokensOut += model.outputTokens ?? 0;
-          costUsd += model.costUSD ?? 0;
+        for (const m of Object.values(modelUsage)) {
+          tokensIn += (m.inputTokens ?? 0) + (m.cacheReadInputTokens ?? 0) + (m.cacheCreationInputTokens ?? 0);
+          tokensOut += m.outputTokens ?? 0;
+          costUsd += m.costUSD ?? 0;
         }
         accumulated.tokensIn = tokensIn;
         accumulated.tokensOut = tokensOut;
         accumulated.costUsd = costUsd;
       } else {
-        // Fallback to basic usage fields
         const usage = event.usage as Record<string, number> | undefined;
         if (usage) {
           accumulated.tokensIn = (usage.input_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0) + (usage.cache_read_input_tokens ?? 0);
@@ -107,19 +116,20 @@ export function createStreamTransformer(
         accumulated.costUsd = (event.total_cost_usd as number) ?? 0;
       }
 
-      // Fallback: if assistant event didn't provide content, use result text
       if (!accumulated.text && typeof event.result === "string") {
         accumulated.text = event.result;
-        emitRole(controller);
-        emit(controller, { content: event.result }, null);
+        streamText(controller, event.result);
       }
 
-      const usage = options?.includeUsage !== false ? {
-        prompt_tokens: accumulated.tokensIn,
-        completion_tokens: accumulated.tokensOut,
-        total_tokens: accumulated.tokensIn + accumulated.tokensOut,
-      } : undefined;
-      emit(controller, {}, "stop", usage);
+      // Don't emit stop here if we have tools — we'll handle it in flush
+      if (!options?.hasTools) {
+        const usage = options?.includeUsage !== false ? {
+          prompt_tokens: accumulated.tokensIn,
+          completion_tokens: accumulated.tokensOut,
+          total_tokens: accumulated.tokensIn + accumulated.tokensOut,
+        } : undefined;
+        emit(controller, {}, "stop", usage);
+      }
 
     // --- Raw Anthropic API format (compatibility) ---
     } else if (type === "message_start") {
@@ -133,14 +143,16 @@ export function createStreamTransformer(
       const delta = event.delta as Record<string, string> | undefined;
       if (delta?.type === "text_delta" && delta.text) {
         accumulated.text += delta.text;
-        emit(controller, { content: delta.text }, null);
+        streamText(controller, delta.text);
       }
     } else if (type === "message_delta") {
       const usage = event.usage as Record<string, number> | undefined;
       if (usage?.output_tokens) {
         accumulated.tokensOut = usage.output_tokens;
       }
-      emit(controller, {}, "stop");
+      if (!options?.hasTools) {
+        emit(controller, {}, "stop");
+      }
     }
   }
 
@@ -172,7 +184,55 @@ export function createStreamTransformer(
         }
       }
 
-      // Only send [DONE] if we haven't already sent a stop via result event
+      // For tool-enabled streams, check if accumulated text contains tool calls
+      if (options?.hasTools && accumulated.text) {
+        const parsed = parseToolCalls(accumulated.text);
+
+        if (parsed.toolCalls.length > 0) {
+          // Text was already streamed to the client in real-time.
+          // Now emit the tool call chunks that were parsed from the full text.
+          for (let i = 0; i < parsed.toolCalls.length; i++) {
+            const tc = parsed.toolCalls[i];
+            emit(controller, {
+              tool_calls: [{
+                index: i,
+                id: tc.id,
+                type: "function" as const,
+                function: {
+                  name: tc.function.name,
+                  arguments: tc.function.arguments,
+                },
+              }],
+            }, null);
+          }
+
+          const usage = options?.includeUsage !== false ? {
+            prompt_tokens: accumulated.tokensIn,
+            completion_tokens: accumulated.tokensOut,
+            total_tokens: accumulated.tokensIn + accumulated.tokensOut,
+          } : undefined;
+          emit(controller, {}, "tool_calls", usage);
+
+          console.log("[stream-transformer] emitted %d tool_calls (text already streamed: %d chars)", parsed.toolCalls.length, streamedTextLength);
+        } else {
+          // No tool calls — text was already streamed, just emit stop
+          const usage = options?.includeUsage !== false ? {
+            prompt_tokens: accumulated.tokensIn,
+            completion_tokens: accumulated.tokensOut,
+            total_tokens: accumulated.tokensIn + accumulated.tokensOut,
+          } : undefined;
+          emit(controller, {}, "stop", usage);
+        }
+      } else if (options?.hasTools && gotResult) {
+        // Tools expected but no text — emit stop
+        const usage = options?.includeUsage !== false ? {
+          prompt_tokens: accumulated.tokensIn,
+          completion_tokens: accumulated.tokensOut,
+          total_tokens: accumulated.tokensIn + accumulated.tokensOut,
+        } : undefined;
+        emit(controller, {}, "stop", usage);
+      }
+
       controller.enqueue(encoder.encode("data: [DONE]\n\n"));
       onDone(accumulated);
     },

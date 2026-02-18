@@ -8,6 +8,9 @@ import { SuccessRates } from "./components/success-rates";
 import { RequestVolume } from "./components/request-volume";
 import { LatencyChart } from "./components/latency-chart";
 import { CostSavings } from "./components/cost-savings";
+import { CompressionStats } from "./components/compression-stats";
+import { CacheHitRate } from "./components/cache-hit-rate";
+import { BudgetGauges } from "./components/budget-gauges";
 import { RecentRequests } from "./components/recent-requests";
 import {
   Select,
@@ -83,9 +86,14 @@ export default function DashboardPage() {
 
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
               <div className="lg:col-span-2">
-                {/* placeholder for future compression/cache charts */}
+                <CompressionStats data={data?.compression ?? []} />
               </div>
               <CostSavings data={data?.cost_savings ?? null} />
+            </div>
+
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+              <CacheHitRate data={data?.cache_hit_rate ?? []} />
+              <BudgetGauges data={data?.budget ?? []} />
             </div>
 
             <RecentRequests data={data?.recent_requests ?? []} />

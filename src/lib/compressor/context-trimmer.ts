@@ -1,8 +1,8 @@
 import type { ChatMessage } from "../types";
 
-const TOKEN_THRESHOLD = 50_000; // estimated tokens
-const KEEP_RECENT_TURNS = 4; // keep last N user turns in full
-const MAX_TURNS_WITH_ASSISTANT = 8; // drop assistant turns older than this
+const TOKEN_THRESHOLD = 150_000; // estimated tokens — only trim very large conversations
+const KEEP_RECENT_TURNS = 10; // keep last N user turns in full
+const MAX_TURNS_WITH_ASSISTANT = 20; // drop assistant turns older than this
 
 /**
  * Stage 5 — Context Trimmer
@@ -10,6 +10,8 @@ const MAX_TURNS_WITH_ASSISTANT = 8; // drop assistant turns older than this
  */
 export function trimContext(messages: ChatMessage[], estimatedTokens: number): ChatMessage[] {
   if (estimatedTokens <= TOKEN_THRESHOLD) return messages;
+
+  console.log("[context-trimmer] trimming: %d estimated tokens > %d threshold, %d messages", estimatedTokens, TOKEN_THRESHOLD, messages.length);
 
   const systemMessages = messages.filter((m) => m.role === "system");
   const conversationMessages = messages.filter((m) => m.role !== "system");

@@ -61,9 +61,10 @@ export const AVAILABLE_MODELS = [
 ];
 
 // Complexity score tiers for fallback routing
+// Sonnet handles most agentic coding tasks well — opus only for genuinely complex work
 export const COMPLEXITY_TIERS = {
-  low: { max: 25, model: "claude-haiku-4-5-20251001" as ClaudeModel },
-  medium: { max: 60, model: "claude-sonnet-4-5-20250929" as ClaudeModel },
+  low: { max: 20, model: "claude-haiku-4-5-20251001" as ClaudeModel },
+  medium: { max: 75, model: "claude-sonnet-4-5-20250929" as ClaudeModel },
   high: { max: 100, model: "claude-opus-4-6" as ClaudeModel },
 };
 

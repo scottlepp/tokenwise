@@ -22,9 +22,30 @@ export interface ContentPartImage {
 
 export type ContentPart = ContentPartText | ContentPartImage;
 
+export interface ToolCall {
+  id: string;
+  type: "function";
+  function: {
+    name: string;
+    arguments: string;
+  };
+}
+
 export interface ChatMessage {
-  role: "system" | "user" | "assistant";
-  content: string | ContentPart[];
+  role: "system" | "user" | "assistant" | "tool";
+  content: string | ContentPart[] | null;
+  tool_calls?: ToolCall[];
+  tool_call_id?: string;
+  name?: string;
+}
+
+export interface ToolDefinition {
+  type: "function";
+  function: {
+    name: string;
+    description?: string;
+    parameters?: Record<string, unknown>;
+  };
 }
 
 export interface ChatCompletionRequest {
@@ -35,15 +56,18 @@ export interface ChatCompletionRequest {
   temperature?: number;
   max_tokens?: number;
   stop?: string | string[];
+  tools?: ToolDefinition[];
+  tool_choice?: string | { type: string; function?: { name: string } };
 }
 
 export interface ChatCompletionChoice {
   index: number;
   message: {
     role: "assistant";
-    content: string;
+    content: string | null;
+    tool_calls?: ToolCall[];
   };
-  finish_reason: "stop" | "length" | null;
+  finish_reason: "stop" | "length" | "tool_calls" | null;
 }
 
 export interface ChatCompletionResponse {
@@ -61,13 +85,22 @@ export interface ChatCompletionResponse {
 
 export interface ChatCompletionChunkDelta {
   role?: "assistant";
-  content?: string;
+  content?: string | null;
+  tool_calls?: Array<{
+    index: number;
+    id?: string;
+    type?: "function";
+    function?: {
+      name?: string;
+      arguments?: string;
+    };
+  }>;
 }
 
 export interface ChatCompletionChunkChoice {
   index: number;
   delta: ChatCompletionChunkDelta;
-  finish_reason: "stop" | "length" | null;
+  finish_reason: "stop" | "length" | "tool_calls" | null;
 }
 
 export interface ChatCompletionChunk {

@@ -16,7 +16,7 @@ function hashKey(parts: string[]): string {
   return createHash("sha256").update(parts.join("||")).digest("hex");
 }
 
-export function getCacheKey(model: string, systemPrompt: string | null, messages: { role: string; content: string | unknown[] }[]): string {
+export function getCacheKey(model: string, systemPrompt: string | null, messages: { role: string; content: string | unknown[] | null }[]): string {
   const msgStr = JSON.stringify(messages.map((m) => ({ role: m.role, content: m.content })));
   return hashKey([model, systemPrompt ?? "", msgStr]);
 }
