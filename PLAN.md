@@ -2,7 +2,7 @@
 
 ## Context
 
-You have a team Claude account and can authenticate via the `claude` CLI (OAuth tokens in `~/.claude/`), but don't have API keys. Cursor supports custom OpenAI-compatible endpoints. This proxy bridges the two: it accepts OpenAI-format HTTP requests from Cursor, intelligently picks the cheapest Claude model that can handle the task, forwards via `claude -p`, logs everything to PostgreSQL, and provides an analytics dashboard to track credit usage and success rates.
+You have a team Claude account and can authenticate via the `claude` CLI (OAuth tokens in `~/.claude/`), but don't have API keys. Cline supports custom OpenAI-compatible endpoints. This proxy bridges the two: it accepts OpenAI-format HTTP requests from VS Code, intelligently picks the cheapest Claude model that can handle the task, forwards via `claude -p`, logs everything to PostgreSQL, and provides an analytics dashboard to track credit usage and success rates.
 
 **No API key needed** — auth is handled entirely by the CLI's existing OAuth session.
 
@@ -400,5 +400,5 @@ curl -X POST http://localhost:3000/api/feedback \
   -H "Content-Type: application/json" \
   -d '{"taskId":"<uuid-from-response>","rating":5}'
 
-# 9. Configure Cursor and test in-editor
+# 9. Configure Cline and test in-editor
 ```
