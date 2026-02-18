@@ -9,7 +9,12 @@ import { insertTaskLog, updateUserRating, getMostRecentTaskId, findTaskByPartial
 import { getCacheKey, getDedupKey, getFromCache, setInCache, isDuplicate, markDedup } from "@/lib/cache";
 import { compress } from "@/lib/compressor";
 import { checkBudget, downgradeModel } from "@/lib/budget";
+import { parseToolCalls } from "@/lib/tool-parser";
 import type { ChatCompletionRequest, ChatCompletionResponse, ClaudeModel } from "@/lib/types";
+
+// Always report this model in responses — keeps clients like Cline happy
+// regardless of which model actually handled the request
+const RESPONSE_MODEL = "claude-sonnet-4-5-20250929";
 
 function errorResponse(message: string, code: string, status: number) {
   return NextResponse.json(
@@ -83,14 +88,18 @@ async function handleFeedback(
 export async function POST(request: NextRequest) {
   console.log("[completions] Incoming request from", request.headers.get("user-agent"));
 
-  let body: ChatCompletionRequest;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let body: ChatCompletionRequest & Record<string, any>;
   try {
     body = await request.json();
   } catch {
     return errorResponse("Invalid JSON body", "invalid_json", 400);
   }
 
-  console.log("[completions] model=%s stream=%s messages=%d", body.model, body.stream, body.messages?.length ?? 0);
+  const toolCount = Array.isArray(body.tools) ? body.tools.length : 0;
+  const toolChoice = body.tool_choice ?? "none";
+  console.log("[completions] model=%s stream=%s messages=%d tools=%d tool_choice=%s",
+    body.model, body.stream, body.messages?.length ?? 0, toolCount, JSON.stringify(toolChoice));
 
   if (!body.messages || !Array.isArray(body.messages) || body.messages.length === 0) {
     return errorResponse("messages array is required and must not be empty", "invalid_messages", 400);
@@ -104,10 +113,12 @@ export async function POST(request: NextRequest) {
   if (lastUserMsg) {
     const text = typeof lastUserMsg.content === "string"
       ? lastUserMsg.content
-      : lastUserMsg.content.filter((p) => p.type === "text").map((p) => (p as { text: string }).text).join("");
+      : Array.isArray(lastUserMsg.content)
+        ? lastUserMsg.content.filter((p) => p.type === "text").map((p) => (p as { text: string }).text).join("")
+        : "";
     const feedback = parseFeedbackCommand(text.trim());
     if (feedback) {
-      return handleFeedback(feedback.rating, feedback.taskId, requestModel);
+      return handleFeedback(feedback.rating, feedback.taskId, RESPONSE_MODEL);
     }
   }
 
@@ -115,7 +126,9 @@ export async function POST(request: NextRequest) {
   const lastUserText = lastUserMsg
     ? typeof lastUserMsg.content === "string"
       ? lastUserMsg.content
-      : lastUserMsg.content.filter((p) => p.type === "text").map((p) => (p as { text: string }).text).join("")
+      : Array.isArray(lastUserMsg.content)
+        ? lastUserMsg.content.filter((p) => p.type === "text").map((p) => (p as { text: string }).text).join("")
+        : ""
     : "";
   const dedupKey = getDedupKey(lastUserText);
   if (isDuplicate(dedupKey) && !streaming) {
@@ -125,6 +138,7 @@ export async function POST(request: NextRequest) {
   markDedup(dedupKey);
 
   // 3. Route to model
+  console.log("[completions] prompt preview: %s", lastUserText.slice(0, 200));
   let decision, category, complexityScore;
   try {
     const result = await selectModel(requestModel, body.messages);
@@ -140,6 +154,18 @@ export async function POST(request: NextRequest) {
       model: "claude-sonnet-4-5-20250929" as ClaudeModel,
       alias: "sonnet",
       reason: "Router error, defaulting to sonnet",
+    };
+  }
+
+  // 3.5. Enforce minimum model for agentic clients (Cline, Aider, etc.)
+  const userAgent = request.headers.get("user-agent") ?? "";
+  const isAgenticClient = /cline|aider|continue|copilot/i.test(userAgent);
+  if (isAgenticClient && decision.model === "claude-haiku-4-5-20251001") {
+    console.log("[completions] upgrading from haiku to sonnet for agentic client: %s", userAgent.slice(0, 50));
+    decision = {
+      model: "claude-sonnet-4-5-20250929" as ClaudeModel,
+      alias: "sonnet",
+      reason: `${decision.reason} -> upgraded to sonnet (agentic client)`,
     };
   }
 
@@ -198,8 +224,13 @@ export async function POST(request: NextRequest) {
 
   // 6. Compress messages
   const compressionResult = compress(body.messages);
-  const { systemPrompt, prompt } = convertMessages(compressionResult.messages);
+  const { systemPrompt, prompt, hasTools } = convertMessages(compressionResult.messages, body.tools);
   const tokensSaved = compressionResult.tokensBefore - compressionResult.tokensAfter;
+
+  console.log("[completions] routed to %s (%s) | model=%s | category=%s complexity=%d | tokens: %d→%d (saved %d) | prompt=%d chars",
+    decision.alias, decision.reason, decision.model, category, complexityScore,
+    compressionResult.tokensBefore, compressionResult.tokensAfter, tokensSaved,
+    prompt.length);
 
   const startTime = Date.now();
   const completionId = `chatcmpl-${crypto.randomUUID()}`;
@@ -215,19 +246,29 @@ export async function POST(request: NextRequest) {
       streaming: true,
     });
 
+    let streamClosed = false;
     const nodeToWeb = new ReadableStream<Uint8Array>({
       start(controller) {
         handle.stdout.on("data", (chunk: Buffer) => {
-          controller.enqueue(new Uint8Array(chunk));
+          if (!streamClosed) {
+            controller.enqueue(new Uint8Array(chunk));
+          }
         });
         handle.stdout.on("end", () => {
-          controller.close();
+          if (!streamClosed) {
+            streamClosed = true;
+            controller.close();
+          }
         });
         handle.stdout.on("error", (err) => {
-          controller.error(err);
+          if (!streamClosed) {
+            streamClosed = true;
+            controller.error(err);
+          }
         });
       },
       cancel() {
+        streamClosed = true;
         handle.child.kill();
       },
     });
@@ -237,15 +278,17 @@ export async function POST(request: NextRequest) {
       resolveAccumulated = resolve;
     });
 
-    const transformer = createStreamTransformer(completionId, requestModel, (acc) => {
+    const transformer = createStreamTransformer(completionId, RESPONSE_MODEL, (acc) => {
       resolveAccumulated!(acc);
-    }, { includeUsage: body.stream_options?.include_usage !== false });
+    }, { includeUsage: body.stream_options?.include_usage !== false, hasTools });
 
     const outputStream = nodeToWeb.pipeThrough(transformer);
 
     // Log asynchronously after stream completes
     accumulatedPromise.then(async (acc) => {
       const latencyMs = Date.now() - startTime;
+      console.log("[completions] stream done in %dms | tokensIn=%d tokensOut=%d cost=$%s | response=%d chars",
+        latencyMs, acc.tokensIn, acc.tokensOut, acc.costUsd.toFixed(4), acc.text.length);
       const evalResult = evaluate(acc.text, true, category, complexityScore);
 
       try {
@@ -331,16 +374,22 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    // Parse tool calls from response if tools were provided
+    const parsed = hasTools ? parseToolCalls(result.text) : null;
+    const hasToolCallsInResponse = parsed && parsed.toolCalls.length > 0;
+
     const response: ChatCompletionResponse = {
       id: completionId,
       object: "chat.completion",
       created: Math.floor(Date.now() / 1000),
-      model: requestModel,
+      model: RESPONSE_MODEL,
       choices: [
         {
           index: 0,
-          message: { role: "assistant", content: result.text },
-          finish_reason: "stop",
+          message: hasToolCallsInResponse
+            ? { role: "assistant", content: parsed!.textContent, tool_calls: parsed!.toolCalls }
+            : { role: "assistant", content: result.text },
+          finish_reason: hasToolCallsInResponse ? "tool_calls" : "stop",
         },
       ],
       usage: {
@@ -350,7 +399,11 @@ export async function POST(request: NextRequest) {
       },
     };
 
-    // Cache the successful response
+    if (hasToolCallsInResponse) {
+      console.log("[completions] tool_calls detected: %d calls", parsed!.toolCalls.length);
+    }
+
+    // Cache the successful response (skip if tool calls — not cacheable)
     const { systemPrompt: sp } = convertMessages(body.messages);
     const cacheKey = getCacheKey(decision.model, sp, body.messages);
     setInCache(cacheKey, response);

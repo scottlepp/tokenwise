@@ -1,6 +1,6 @@
-# Claude Wrapper — Smart Claude Proxy
+# Claude Proxy — Smart Claude Proxy
 
-OpenAI-compatible local proxy that routes Cursor requests to Claude CLI with smart model selection, cost optimization, and analytics.
+OpenAI-compatible local proxy that routes requests from agentic coding tools (Cline, Aider, Cursor, Continue, etc.) to the Claude CLI with smart model selection, cost optimization, and analytics.
 
 ## Project docs
 
@@ -45,7 +45,7 @@ curl http://localhost:3000/v1/chat/completions \
 ## Architecture rules
 
 - **Request pipeline order**: parse → /feedback intercept → cache → compress → classify → route → budget check → spawn CLI → log → respond
-- **Compression is lossless only** — normalize structure, never rewrite intent. Preserve Cursor's XML-like tags (`<context>`, `<file>`). If a stage fails, skip it silently.
+- **Compression is lossless only** — normalize structure, never rewrite intent. Preserve XML-like tags (`<context>`, `<file>`, tool definitions, etc.) from clients. If a stage fails, skip it silently.
 - **Smart router**: picks cheapest model that historically succeeds for the task category. Respects explicit Claude model names from user. Falls back to complexity-score tiers when no history.
 - **Every response** includes `x-task-id` header for feedback targeting.
 - **Streaming** uses `TransformStream` piping Claude NDJSON → OpenAI SSE. Non-streaming collects full stdout JSON.
@@ -60,5 +60,5 @@ DATABASE_URL=postgresql://claude:claude@localhost:5432/claude_proxy
 
 - `claude -p` requires `--verbose` flag when using `--output-format stream-json`
 - Long prompts (>100KB) must be piped via stdin, not passed as CLI argument (ARG_MAX limit)
-- Cursor requires a non-empty API key field — the proxy ignores the Authorization header entirely
+- Clients (Cursor, Cline, etc.) require a non-empty API key field — the proxy ignores the Authorization header entirely
 - `--no-session-persistence` is needed to avoid writing session files per request

@@ -201,9 +201,9 @@
   - [x] Request volume (bar chart)
   - [x] Latency by model (bar chart)
   - [x] Cost savings estimate card (actual vs all-opus)
-  - [ ] Compression stats (tokens saved per day, stacked bar by stage)
-  - [ ] Cache hit rate (line chart over time)
-  - [ ] Budget gauges (daily/weekly/monthly with green/yellow/red zones)
+  - [x] Compression stats (tokens saved per day, stacked bar by stage)
+  - [x] Cache hit rate (line chart over time)
+  - [x] Budget gauges (daily/weekly/monthly with green/yellow/red zones)
   - [x] Recent requests table (sortable: time, category, model, tokens, compression ratio, cost, success, rating)
 
 - [x] **24. Feedback UI in recent requests table**

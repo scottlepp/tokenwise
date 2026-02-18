@@ -11,7 +11,8 @@ export interface CompressionResult {
   tokensAfter: number;
 }
 
-function extractText(content: string | ContentPart[]): string {
+function extractText(content: string | ContentPart[] | null): string {
+  if (content === null) return "";
   if (typeof content === "string") return content;
   return content
     .filter((p): p is { type: "text"; text: string } => p.type === "text")
@@ -63,6 +64,7 @@ function compressText(text: string): string {
 
 export function compress(messages: ChatMessage[]): CompressionResult {
   const tokensBefore = estimateTokens(messages);
+  const msgsBefore = messages.length;
 
   // Stage 5: Context trimmer (operates on messages array)
   let compressed: ChatMessage[];
@@ -70,6 +72,10 @@ export function compress(messages: ChatMessage[]): CompressionResult {
     compressed = trimContext(messages, tokensBefore);
   } catch {
     compressed = messages;
+  }
+
+  if (compressed.length !== msgsBefore) {
+    console.log("[compressor] context trimmed: %d→%d messages", msgsBefore, compressed.length);
   }
 
   // Apply text compression to each message

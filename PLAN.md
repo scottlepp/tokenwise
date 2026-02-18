@@ -2,7 +2,7 @@
 
 ## Context
 
-You have a team Claude account and can authenticate via the `claude` CLI (OAuth tokens in `~/.claude/`), but don't have API keys. Cursor supports custom OpenAI-compatible endpoints. This proxy bridges the two: it accepts OpenAI-format HTTP requests from Cursor, intelligently picks the cheapest Claude model that can handle the task, forwards via `claude -p`, logs everything to PostgreSQL, and provides an analytics dashboard to track credit usage and success rates.
+You have a team Claude account and can authenticate via the `claude` CLI (OAuth tokens in `~/.claude/`), but don't have API keys. Agentic coding tools like Cline, Aider, Cursor, and Continue support custom OpenAI-compatible endpoints. This proxy bridges the two: it accepts OpenAI-format HTTP requests from any such tool, intelligently picks the cheapest Claude model that can handle the task, forwards via `claude -p`, logs everything to PostgreSQL, and provides an analytics dashboard to track credit usage and success rates.
 
 **No API key needed** — auth is handled entirely by the CLI's existing OAuth session.
 
@@ -12,14 +12,14 @@ You have a team Claude account and can authenticate via the `claude` CLI (OAuth 
                                     ┌─────────────────────────────────────────┐
                                     │         Next.js App (localhost:3000)     │
                                     │                                         │
-Cursor ──POST /v1/chat/completions──►  1. Classify task complexity            │
+Client ──POST /v1/chat/completions──►  1. Classify task complexity            │
                                     │  2. Smart Router picks model             │
                                     │     (haiku / sonnet / opus)              │
                                     │  3. Spawn: claude -p --model <picked>   │
                                     │  4. Stream/collect response              │
                                     │  5. Log to PostgreSQL                    │
                                     │  6. Return OpenAI-format response        │
-Cursor ◄── SSE or JSON response ────┤                                         │
+Client ◄── SSE or JSON response ────┤                                         │
                                     │                                         │
 Browser ── GET /dashboard ──────────►  Analytics UI (shadcn + Recharts)       │
                                     └────────────────┬────────────────────────┘
@@ -349,15 +349,19 @@ Optional: add the Next.js app itself as a service for fully dockerized deploymen
 ## Key Design Decisions
 
 - **CLI auth, not API keys**: Delegates all auth to `claude -p`'s OAuth session
-- **Smart routing by default**: If Cursor sends `gpt-4` or any non-Claude model name, the router classifies and picks the cheapest viable model. If Cursor sends `opus`/`sonnet`/`haiku`, it respects the explicit choice.
+- **Smart routing by default**: If a client sends `gpt-4`, `auto`, or any non-Claude model name, the router classifies and picks the cheapest viable model. If it sends `opus`/`sonnet`/`haiku`, it respects the explicit choice. Agentic clients (Cline, Aider, etc.) are auto-upgraded to at least sonnet.
+- **Client-agnostic**: Works with any tool that supports OpenAI-compatible endpoints — Cline, Aider, Cursor, Continue, etc. Responses always report `claude-sonnet-4-5-20250929` as the model name for maximum client compatibility.
 - **Three-layer success tracking**: CLI exit code (automatic) + response heuristics (automatic) + user feedback (optional). Routing learns from all three.
 - **Consecutive failure detection**: If haiku fails 3x in a row on `code_gen` tasks, the router auto-promotes to sonnet for that category
 - **Stateless proxy**: Each request spawns a fresh `claude -p`. Multi-turn context is flattened into the prompt.
 - **PostgreSQL over TimescaleDB**: Simpler setup, plenty fast for this scale, can add TimescaleDB extension later if needed
 - **Dashboard is in-app**: No separate service — same Next.js app serves both the proxy API and the analytics UI
 
-## Cursor Configuration
+## Client Configuration
 
+Any agentic coding tool that supports OpenAI-compatible endpoints can use this proxy.
+
+### Cursor
 ```
 Settings > Models > OpenAI API:
   Base URL:  http://localhost:3000/v1
@@ -365,7 +369,34 @@ Settings > Models > OpenAI API:
   Model:     auto               (or opus, sonnet, haiku for explicit choice)
 ```
 
-When model is `auto` (or any OpenAI model name like `gpt-4`), the smart router takes over.
+### Cline (VS Code)
+```
+Settings > Cline > API Provider: OpenAI Compatible
+  Base URL:  http://localhost:3000/v1
+  API Key:   sk-local          (any non-empty string)
+  Model:     claude-sonnet-4-5-20250929
+```
+
+### Aider
+```bash
+aider --openai-api-base http://localhost:3000/v1 --openai-api-key sk-local
+```
+
+### Continue (VS Code)
+```json
+// ~/.continue/config.json
+{
+  "models": [{
+    "provider": "openai",
+    "title": "Claude Proxy",
+    "apiBase": "http://localhost:3000/v1",
+    "apiKey": "sk-local",
+    "model": "auto"
+  }]
+}
+```
+
+When model is `auto` (or any OpenAI model name like `gpt-4`), the smart router takes over. Agentic clients (detected via User-Agent) are automatically upgraded to at least sonnet.
 
 ## Verification
 
