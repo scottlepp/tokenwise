@@ -1,13 +1,98 @@
 import { db } from ".";
-import { taskLogs, budgetConfig } from "./schema";
-import { desc, sql, gte, eq } from "drizzle-orm";
-import type { TaskLogInsert } from "../types";
+import { taskLogs, requestLogs, statusLogs, budgetConfig } from "./schema";
+import { desc, sql, gte, eq, and, inArray } from "drizzle-orm";
+import type { TaskLogInsert, RequestLogInsert, StatusLogInsert } from "../types";
 
 function daysAgo(days: number): Date {
   const d = new Date();
   d.setDate(d.getDate() - days);
   return d;
 }
+
+// ── Request Logs ──
+
+export async function insertRequestLog(data: RequestLogInsert): Promise<string> {
+  const [row] = await db.insert(requestLogs).values(data).returning({ id: requestLogs.id });
+  return row.id;
+}
+
+export async function updateRequestStatus(
+  requestId: string,
+  status: string,
+  extras?: { httpStatus?: number; errorMessage?: string; totalLatencyMs?: number }
+) {
+  await db.update(requestLogs).set({
+    status,
+    completedAt: new Date(),
+    ...extras,
+  }).where(eq(requestLogs.id, requestId));
+}
+
+// ── Status Logs ──
+
+export async function insertStatusLog(data: StatusLogInsert) {
+  await db.insert(statusLogs).values(data);
+}
+
+/** Get all status logs for a request, ordered by time */
+export async function getStatusLogsForRequest(requestId: string) {
+  return db
+    .select()
+    .from(statusLogs)
+    .where(eq(statusLogs.requestId, requestId))
+    .orderBy(statusLogs.createdAt);
+}
+
+/** Get recent requests with their status logs (joined) */
+export async function getRecentRequestsWithStatus(limit: number) {
+  const requests = await db
+    .select()
+    .from(requestLogs)
+    .orderBy(desc(requestLogs.createdAt))
+    .limit(limit);
+
+  if (requests.length === 0) return [];
+
+  const requestIds = requests.map((r) => r.id);
+  const statuses = await db
+    .select()
+    .from(statusLogs)
+    .where(inArray(statusLogs.requestId, requestIds))
+    .orderBy(statusLogs.createdAt);
+
+  const statusMap = new Map<string, typeof statuses>();
+  for (const s of statuses) {
+    const list = statusMap.get(s.requestId) ?? [];
+    list.push(s);
+    statusMap.set(s.requestId, list);
+  }
+
+  return requests.map((r) => ({
+    ...r,
+    steps: statusMap.get(r.id) ?? [],
+  }));
+}
+
+/** Get a request with its task log and all status logs */
+export async function getRequestDetail(requestId: string) {
+  const [request] = await db
+    .select()
+    .from(requestLogs)
+    .where(eq(requestLogs.id, requestId))
+    .limit(1);
+  if (!request) return null;
+
+  const steps = await getStatusLogsForRequest(requestId);
+  const [task] = await db
+    .select()
+    .from(taskLogs)
+    .where(eq(taskLogs.requestId, requestId))
+    .limit(1);
+
+  return { request, steps, task: task ?? null };
+}
+
+// ── Task Logs ──
 
 export async function insertTaskLog(data: TaskLogInsert) {
   const [row] = await db.insert(taskLogs).values(data).returning({ id: taskLogs.id });
@@ -174,6 +259,103 @@ export async function getCacheHitRate(days: number) {
     .where(gte(taskLogs.createdAt, since))
     .groupBy(sql`date_trunc('day', ${taskLogs.createdAt})::date`)
     .orderBy(sql`date_trunc('day', ${taskLogs.createdAt})::date`);
+}
+
+// ── Pipeline & Request Stats (from request_logs + status_logs) ──
+
+/** Average duration per pipeline step */
+export async function getPipelineStepStats(days: number) {
+  const since = daysAgo(days);
+  return db
+    .select({
+      step: statusLogs.step,
+      avgDurationMs: sql<number>`avg(${statusLogs.durationMs})::int`,
+      p50: sql<number>`percentile_cont(0.5) within group (order by ${statusLogs.durationMs})::int`,
+      p95: sql<number>`percentile_cont(0.95) within group (order by ${statusLogs.durationMs})::int`,
+      count: sql<number>`count(*)::int`,
+      errorCount: sql<number>`count(*) filter (where ${statusLogs.status} = 'error')::int`,
+    })
+    .from(statusLogs)
+    .where(gte(statusLogs.createdAt, since))
+    .groupBy(statusLogs.step);
+}
+
+/** Request status breakdown (completed, error, cached, deduped, etc.) */
+export async function getRequestStatusBreakdown(days: number) {
+  const since = daysAgo(days);
+  return db
+    .select({
+      status: requestLogs.status,
+      count: sql<number>`count(*)::int`,
+    })
+    .from(requestLogs)
+    .where(gte(requestLogs.createdAt, since))
+    .groupBy(requestLogs.status);
+}
+
+/** Classification cost tracking — extracts LLM classifier costs from status_logs detail JSON */
+export async function getClassificationCosts(days: number) {
+  const since = daysAgo(days);
+  return db
+    .select({
+      date: sql<string>`date_trunc('day', ${statusLogs.createdAt})::date::text`,
+      totalCalls: sql<number>`count(*)::int`,
+      totalCostUsd: sql<number>`coalesce(sum((${statusLogs.detail}::jsonb->>'classifierCostUsd')::float), 0)::float`,
+      avgLatencyMs: sql<number>`avg((${statusLogs.detail}::jsonb->>'classifierLatencyMs')::float)::int`,
+    })
+    .from(statusLogs)
+    .where(
+      and(
+        gte(statusLogs.createdAt, since),
+        eq(statusLogs.step, "classify"),
+        sql`jsonb_exists(${statusLogs.detail}::jsonb, 'classifierCostUsd')`
+      )
+    )
+    .groupBy(sql`date_trunc('day', ${statusLogs.createdAt})::date`)
+    .orderBy(sql`date_trunc('day', ${statusLogs.createdAt})::date`);
+}
+
+/** Recent requests from request_logs with joined pipeline steps and task info */
+export async function getRecentRequestsDetailed(limit: number) {
+  const requests = await db
+    .select()
+    .from(requestLogs)
+    .orderBy(desc(requestLogs.createdAt))
+    .limit(limit);
+
+  if (requests.length === 0) return [];
+
+  const requestIds = requests.map((r) => r.id);
+
+  const [statuses, tasks] = await Promise.all([
+    db
+      .select()
+      .from(statusLogs)
+      .where(inArray(statusLogs.requestId, requestIds))
+      .orderBy(statusLogs.createdAt),
+    db
+      .select()
+      .from(taskLogs)
+      .where(inArray(taskLogs.requestId, requestIds)),
+  ]);
+
+  const statusMap = new Map<string, typeof statuses>();
+  for (const s of statuses) {
+    const list = statusMap.get(s.requestId) ?? [];
+    list.push(s);
+    statusMap.set(s.requestId, list);
+  }
+
+  const taskMap = new Map<string, (typeof tasks)[0]>();
+  for (const t of tasks) {
+    if (t.requestId) taskMap.set(t.requestId, t);
+  }
+
+  return requests.map((r) => ({
+    ...r,
+    steps: statusMap.get(r.id) ?? [],
+    task: taskMap.get(r.id) ?? null,
+  }));
 }
 
 export async function getBudgetUsage() {

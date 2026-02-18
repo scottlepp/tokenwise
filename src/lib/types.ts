@@ -125,6 +125,14 @@ export interface RouterDecision {
 export interface ClassificationResult {
   category: TaskCategory;
   complexityScore: number;
+  /** Present when LLM classifier was used */
+  llm?: {
+    model: string;
+    tokensIn: number;
+    tokensOut: number;
+    costUsd: number;
+    latencyMs: number;
+  };
 }
 
 export interface SuccessEvaluation {
@@ -133,6 +141,7 @@ export interface SuccessEvaluation {
 }
 
 export interface TaskLogInsert {
+  requestId?: string;
   taskCategory: TaskCategory;
   complexityScore: number;
   promptSummary: string;
@@ -152,4 +161,38 @@ export interface TaskLogInsert {
   tokensAfterCompression?: number;
   cacheHit?: boolean;
   budgetRemainingUsd?: string;
+}
+
+export interface RequestLogInsert {
+  userAgent?: string;
+  clientIp?: string;
+  modelRequested?: string;
+  messageCount: number;
+  toolCount: number;
+  streaming: boolean;
+  promptPreview?: string;
+}
+
+export type PipelineStep =
+  | "parse"
+  | "feedback"
+  | "dedup"
+  | "classify"
+  | "route"
+  | "budget_check"
+  | "cache_check"
+  | "compress"
+  | "cli_spawn"
+  | "cli_streaming"
+  | "cli_done"
+  | "tool_parse"
+  | "response_sent"
+  | "log_task";
+
+export interface StatusLogInsert {
+  requestId: string;
+  step: PipelineStep;
+  status: "started" | "completed" | "error" | "skipped";
+  durationMs?: number;
+  detail?: string;
 }

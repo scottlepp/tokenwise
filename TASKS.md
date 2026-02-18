@@ -228,3 +228,141 @@
   - [ ] README with setup + Cursor config instructions
 
 - [ ] **Milestone: fresh clone → `docker compose up` → `npm run dev` → working proxy + dashboard**
+
+---
+
+## Phase 5: Multi-Provider Support
+
+- [ ] **27. Create provider abstraction layer**
+  - [ ] Create `src/lib/providers/base.ts` — abstract base class with shared logic (validation, timeout, retry)
+  - [ ] Create `src/lib/providers/index.ts` — `ProviderRegistry` class with `register()`, `getEnabled()`, `getAllModels()`, `getModelsByCost()`
+  - [ ] Auto-initialization from environment variables
+  - [ ] Export singleton `providerRegistry`
+
+- [ ] **28. Refactor Claude CLI into provider adapter**
+  - [ ] Move `src/lib/claude-cli.ts` → `src/lib/providers/claude-cli.ts`
+  - [ ] Implement `LLMProvider` interface (keep existing spawn logic)
+  - [ ] `isAvailable()`: check if `claude` binary exists on PATH
+  - [ ] `getModels()`: return opus/sonnet/haiku with current pricing
+  - [ ] Move `src/lib/stream-transformer.ts` → `src/lib/stream-transformers/claude-ndjson.ts`
+  - [ ] Create `src/lib/stream-transformers/index.ts` — factory: provider → transformer
+  - [ ] Update imports across codebase
+
+- [ ] **29. Create Claude API provider**
+  - [ ] Create `src/lib/providers/claude-api.ts` — Anthropic HTTP API (`ANTHROPIC_API_KEY`)
+  - [ ] `POST https://api.anthropic.com/v1/messages` with proper headers
+  - [ ] Handle Anthropic message format (system as top-level field)
+  - [ ] Create `src/lib/stream-transformers/anthropic-sse.ts` — parse Anthropic SSE → OpenAI SSE
+  - [ ] Non-streaming and streaming paths
+
+- [ ] **30. Create OpenAI provider**
+  - [ ] Create `src/lib/providers/openai.ts` — OpenAI HTTP API (`OPENAI_API_KEY`)
+  - [ ] `POST https://api.openai.com/v1/chat/completions` — native format
+  - [ ] Create `src/lib/stream-transformers/openai-passthrough.ts` — passthrough with token accumulation
+  - [ ] Support function calling, vision, JSON mode
+
+- [ ] **31. Create Gemini provider**
+  - [ ] Create `src/lib/providers/gemini.ts` — Google Gemini API (`GEMINI_API_KEY`)
+  - [ ] Convert OpenAI messages → Gemini `contents[]` format
+  - [ ] Handle streaming via `streamGenerateContent?alt=sse`
+  - [ ] Create `src/lib/stream-transformers/gemini-sse.ts` — Gemini SSE → OpenAI SSE
+
+- [ ] **32. Create Ollama provider**
+  - [ ] Create `src/lib/providers/ollama.ts` — Ollama local API (`OLLAMA_BASE_URL`)
+  - [ ] `POST /api/chat` with messages, `GET /api/tags` for model discovery
+  - [ ] Create `src/lib/stream-transformers/ollama-ndjson.ts` — Ollama NDJSON → OpenAI SSE
+  - [ ] Cost: $0 (local), track token counts for analytics
+
+- [ ] **33. Create generic OpenAI-compatible provider**
+  - [ ] Create `src/lib/providers/openai-compatible.ts` — configurable `baseUrl`, `apiKey`, `models[]`
+  - [ ] Parse `CUSTOM_PROVIDERS` JSON env var for configuration
+  - [ ] Each instance gets unique `ProviderId` (e.g., `groq`, `together`)
+  - [ ] Reuse OpenAI passthrough stream transformer
+
+- [ ] **34. Update model config and types**
+  - [ ] Expand `src/lib/config.ts` — provider-grouped `MODEL_CATALOG` with tier/cost/capabilities
+  - [ ] Update `src/lib/types.ts` — add `ProviderId`, update `RouterDecision` with `provider` field
+  - [ ] Dynamic `AVAILABLE_MODELS` from enabled providers
+  - [ ] Legacy model name aliases still work (`gpt-4` → tier lookup)
+
+- [ ] **35. Update router for cross-provider selection**
+  - [ ] Support explicit `provider:model` syntax (e.g., `openai:gpt-4o`)
+  - [ ] Recognize models from any provider (not just Claude)
+  - [ ] Cross-provider tier-based selection (cheapest model in required tier)
+  - [ ] Historical success rate lookup per provider+model+category
+  - [ ] Budget-aware provider preference (≥80% budget → prefer cheaper providers)
+  - [ ] Router reason includes provider: `"openai/gpt-4o-mini: cheapest economy, 92% success"`
+
+- [ ] **36. Update completions endpoint for multi-provider dispatch**
+  - [ ] Dispatch to provider adapter instead of direct Claude CLI spawn
+  - [ ] Add `x-provider` and `x-model` response headers
+  - [ ] Cache keys include provider
+  - [ ] Log `provider` field in task_logs
+  - [ ] Update DB schema: add `provider` column to task_logs
+
+- [ ] **Milestone: `curl` with `model: "openai:gpt-4o"` routes to OpenAI, `model: "auto"` picks cheapest**
+- [ ] **Milestone: `/v1/models` returns models from all enabled providers**
+
+---
+
+## Phase 6: Dashboard Updates for Multi-Provider
+
+- [ ] **37. Update DB queries for provider awareness**
+  - [ ] `getCostByProvider(days)` — cost breakdown per provider
+  - [ ] `getModelBreakdown(days)` — grouped by provider → model
+  - [ ] `getSuccessRates(days)` — by provider and provider+model
+  - [ ] `getProviderLatency(days)` — avg latency per provider
+  - [ ] `getProviderComparison(days)` — side-by-side stats
+  - [ ] Update existing queries to include `provider` in grouping
+
+- [ ] **38. Create provider comparison dashboard widget**
+  - [ ] `src/app/dashboard/components/provider-comparison.tsx`
+  - [ ] Side-by-side cards for each active provider
+  - [ ] Metrics: total requests, total cost, avg latency, success rate
+  - [ ] Color-coded by provider (consistent colors across all charts)
+
+- [ ] **39. Update existing dashboard charts**
+  - [ ] Cost over time: stack by provider
+  - [ ] Model breakdown: group by provider
+  - [ ] Success rates: add provider filter dropdown
+  - [ ] Latency chart: group by provider
+  - [ ] Recent requests table: add "Provider" column + filter
+  - [ ] Stats cards: add "Providers Active" card
+
+- [ ] **40. Create provider management API + UI**
+  - [ ] `GET /api/providers` — list all providers with status
+  - [ ] `PUT /api/providers/:id` — enable/disable, set priority
+  - [ ] Add `provider_config` table to DB schema
+  - [ ] Run `drizzle-kit push` for schema changes
+
+- [ ] **Milestone: dashboard shows per-provider cost breakdown and comparison charts**
+
+---
+
+## Phase 7: Advanced Cross-Provider Features
+
+- [ ] **41. Provider fallback chains**
+  - [ ] Auto-retry with next cheapest provider on failure (rate limit, timeout, server error)
+  - [ ] Configurable max retries and retryable error types
+  - [ ] Escalate to next tier if all same-tier providers fail
+  - [ ] Link fallback attempts via `request_group_id`
+
+- [ ] **42. Provider-specific message conversion**
+  - [ ] System prompt handling per provider (flag, field, or message role)
+  - [ ] Vision support per provider (image_url, inline_data, etc.)
+  - [ ] Tool/function calling conversion per provider
+  - [ ] Multi-turn format differences (flatten vs native)
+
+- [ ] **43. Unified token counting and cost calculation**
+  - [ ] Normalize token counts from each provider's format
+  - [ ] Provider-specific usage field extraction (Claude, OpenAI, Gemini, Ollama)
+  - [ ] Unified `{ tokensIn, tokensOut, costUsd }` output
+
+- [ ] **44. A/B testing across providers (optional)**
+  - [ ] Split traffic between providers for same task category
+  - [ ] Log both results, compare heuristic scores
+  - [ ] Dashboard shows A/B test results
+  - [ ] Auto-promote challenger if it outperforms baseline
+
+- [ ] **Milestone: provider fallback works — disabling one provider routes to next cheapest**
+- [ ] **Milestone: A/B test dashboard shows side-by-side provider comparison**
