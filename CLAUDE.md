@@ -1,6 +1,6 @@
 # Claude Wrapper — Smart Claude Proxy
 
-OpenAI-compatible local proxy that routes Cursor requests to Claude CLI with smart model selection, cost optimization, and analytics.
+OpenAI-compatible local proxy that routes requests to Claude CLI with smart model selection, cost optimization, and analytics.
 
 ## Project docs
 
