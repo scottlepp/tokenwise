@@ -1,4 +1,7 @@
 import type { TaskCategory, ChatMessage, ClassificationResult, ContentPart } from "./types";
+import { spawnClaudeNonStreaming } from "./claude-cli";
+
+const LLM_CLASSIFIER_ENABLED = process.env.LLM_CLASSIFIER === "true";
 
 function extractText(content: string | ContentPart[] | null): string {
   if (content === null) return "";
@@ -115,8 +118,73 @@ function calculateComplexity(
   return Math.max(0, Math.min(100, Math.round(score)));
 }
 
-export function classifyTask(messages: ChatMessage[]): ClassificationResult {
-  // Get the text to analyze — focus on last user message + system context
+const VALID_CATEGORIES = new Set<TaskCategory>([
+  "simple_qa", "code_gen", "code_review", "debug", "refactor", "explain", "other",
+]);
+
+const CLASSIFICATION_PROMPT = `Classify this coding task. Return ONLY a JSON object, no other text.
+
+Categories: simple_qa, code_gen, code_review, debug, refactor, explain, other
+Complexity: 0-100 (0=trivial, 30=simple file edit, 50=moderate feature, 70=complex multi-file, 90=architectural)
+
+Guidelines for complexity:
+- 0-20: trivial questions, greetings, simple lookups
+- 21-45: single file edits, simple bug fixes, writing one function
+- 46-65: multi-file changes, moderate features, debugging with investigation
+- 66-80: complex features, refactoring across modules, system design
+- 81-100: architectural changes, distributed systems, security audits
+
+Respond with: {"category":"<category>","complexity":<number>}`;
+
+async function classifyWithLLM(userText: string, messageCount: number, hasTools: boolean): Promise<ClassificationResult | null> {
+  // Build a compact summary — don't send the whole conversation
+  const truncatedText = userText.slice(0, 2000);
+  const contextNote = messageCount > 2 ? ` (conversation with ${messageCount} messages)` : "";
+  const toolNote = hasTools ? " (agentic tool-use context)" : "";
+  const prompt = `${truncatedText}${contextNote}${toolNote}`;
+
+  const llmStart = Date.now();
+  try {
+    const result = await spawnClaudeNonStreaming({
+      model: "claude-haiku-4-5-20251001",
+      prompt,
+      systemPrompt: CLASSIFICATION_PROMPT,
+      streaming: false,
+    });
+    const latencyMs = Date.now() - llmStart;
+
+    if (result.isError || !result.text) return null;
+
+    // Parse JSON from response — haiku might wrap it in markdown
+    const jsonMatch = result.text.match(/\{[^}]+\}/);
+    if (!jsonMatch) return null;
+
+    const parsed = JSON.parse(jsonMatch[0]);
+    const category = VALID_CATEGORIES.has(parsed.category) ? parsed.category as TaskCategory : "other";
+    const complexity = Math.max(0, Math.min(100, Math.round(Number(parsed.complexity) || 50)));
+
+    console.log("[classifier] LLM (haiku): category=%s complexity=%d | cost=$%s | latency=%dms | input=%d chars",
+      category, complexity, result.costUsd.toFixed(4), latencyMs, prompt.length);
+
+    return {
+      category,
+      complexityScore: complexity,
+      llm: {
+        model: "claude-haiku-4-5-20251001",
+        tokensIn: result.tokensIn,
+        tokensOut: result.tokensOut,
+        costUsd: result.costUsd,
+        latencyMs,
+      },
+    };
+  } catch (err) {
+    console.warn("[classifier] LLM classification failed, falling back to heuristic:", (err as Error).message);
+    return null;
+  }
+}
+
+/** Synchronous heuristic classifier — always available, zero latency */
+export function classifyTaskHeuristic(messages: ChatMessage[]): ClassificationResult {
   const systemMessages = messages.filter((m) => m.role === "system");
   const userMessages = messages.filter((m) => m.role === "user");
   const lastUserMessage = userMessages[userMessages.length - 1];
@@ -128,8 +196,24 @@ export function classifyTask(messages: ChatMessage[]): ClassificationResult {
   const category = detectCategory(textToAnalyze);
   const complexityScore = calculateComplexity(fullText, messages, systemPrompt);
 
-  console.log("[classifier] category=%s complexity=%d | user_msg=%d chars | turns=%d | messages=%d",
+  console.log("[classifier] heuristic: category=%s complexity=%d | user_msg=%d chars | turns=%d | messages=%d",
     category, complexityScore, textToAnalyze.length, userMessages.length, messages.length);
 
   return { category, complexityScore };
+}
+
+/** Main classifier — uses LLM (haiku) if enabled, falls back to heuristic */
+export async function classifyTask(messages: ChatMessage[]): Promise<ClassificationResult> {
+  if (LLM_CLASSIFIER_ENABLED) {
+    const userMessages = messages.filter((m) => m.role === "user");
+    const lastUserText = userMessages.length > 0
+      ? extractText(userMessages[userMessages.length - 1].content)
+      : "";
+    const hasTools = messages.some((m) => m.role === "tool" || (m.role === "assistant" && m.tool_calls && m.tool_calls.length > 0));
+
+    const llmResult = await classifyWithLLM(lastUserText, messages.length, hasTools);
+    if (llmResult) return llmResult;
+  }
+
+  return classifyTaskHeuristic(messages);
 }

@@ -1,6 +1,6 @@
-# Claude Proxy — Smart Claude Proxy
+# Claude Proxy — Smart LLM Proxy
 
-OpenAI-compatible local proxy that routes requests from agentic coding tools (Cline, Aider, Cursor, Continue, etc.) to the Claude CLI with smart model selection, cost optimization, and analytics.
+OpenAI-compatible local proxy that routes requests from agentic coding tools (Cline, Aider, Cursor, Continue, etc.) to multiple LLM providers with smart model selection, cross-provider cost optimization, and analytics.
 
 ## Project docs
 
@@ -32,7 +32,20 @@ curl http://localhost:3000/v1/chat/completions \
 - Next.js 15, App Router, TypeScript (strict)
 - Drizzle ORM + PostgreSQL 17 (Docker)
 - shadcn/ui + Tailwind + Recharts for dashboard
-- `claude -p` CLI for all model calls (no API key — uses OAuth from ~/.claude/)
+- Multi-provider support: Claude CLI, Claude API, OpenAI, Gemini, Ollama, custom OpenAI-compatible
+
+## Supported providers
+
+| Provider      | Auth                       | Transport               |
+| ------------- | -------------------------- | ----------------------- |
+| Claude (CLI)  | OAuth session (~/.claude/) | `claude -p` subprocess  |
+| Claude (API)  | `ANTHROPIC_API_KEY`        | HTTPS API               |
+| OpenAI        | `OPENAI_API_KEY`           | HTTPS API               |
+| Google Gemini | `GEMINI_API_KEY`           | HTTPS API               |
+| Ollama        | None (local)               | HTTP (localhost:11434)  |
+| Custom        | Configurable               | OpenAI-compatible HTTPS |
+
+Providers are **opt-in** — only providers with configured credentials are active.
 
 ## Code style
 
@@ -41,19 +54,47 @@ curl http://localhost:3000/v1/chat/completions \
 - Use `crypto.randomUUID()` for IDs (no uuid package)
 - Error responses must match OpenAI error format: `{ error: { message, type, code } }`
 - All DB access goes through `src/lib/db/queries.ts` — no raw SQL in route handlers
+- Provider implementations go in `src/lib/providers/` and implement the `LLMProvider` interface
+- Stream transformers go in `src/lib/stream-transformers/` (one per provider format)
 
 ## Architecture rules
 
-- **Request pipeline order**: parse → /feedback intercept → cache → compress → classify → route → budget check → spawn CLI → log → respond
+- **Request pipeline order**: parse → /feedback intercept → cache → compress → classify → route (cross-provider) → budget check → dispatch to provider → log → respond
+- **Provider abstraction**: All providers implement `LLMProvider` interface. Adding a new provider = one file + register in init.
+- **Cross-provider routing**: Router compares costs across ALL enabled providers. Complexity score determines tier (economy/standard/premium), then cheapest model in tier wins.
+- **Model resolution**: Supports exact model names (`gpt-4o`), aliases (`sonnet`), tier names (`economy`), provider prefix (`openai:gpt-4o`), and `auto` (full smart routing).
 - **Compression is lossless only** — normalize structure, never rewrite intent. Preserve XML-like tags (`<context>`, `<file>`, tool definitions, etc.) from clients. If a stage fails, skip it silently.
-- **Smart router**: picks cheapest model that historically succeeds for the task category. Respects explicit Claude model names from user. Falls back to complexity-score tiers when no history.
-- **Every response** includes `x-task-id` header for feedback targeting.
-- **Streaming** uses `TransformStream` piping Claude NDJSON → OpenAI SSE. Non-streaming collects full stdout JSON.
+- **Every response** includes `x-task-id`, `x-provider`, `x-model` headers.
+- **Streaming** uses provider-specific stream transformers to normalize to OpenAI SSE format.
+- **Graceful degradation**: If a provider goes down, others automatically take over via fallback chains.
 
 ## Environment
 
-```
+```bash
+# Database (required)
 DATABASE_URL=postgresql://claude:claude@localhost:5432/claude_proxy
+
+# Claude CLI (auto-detected — no config needed if `claude` is on PATH)
+
+# Claude API (optional)
+ANTHROPIC_API_KEY=sk-ant-...
+
+# OpenAI (optional)
+OPENAI_API_KEY=sk-...
+
+# Google Gemini (optional)
+GEMINI_API_KEY=AIza...
+
+# Ollama (optional — auto-detected on localhost:11434)
+OLLAMA_BASE_URL=http://localhost:11434
+
+# Custom OpenAI-compatible providers (optional JSON array)
+CUSTOM_PROVIDERS='[{"id":"groq","displayName":"Groq","baseUrl":"https://api.groq.com/openai/v1","apiKey":"gsk_...","models":[...]}]'
+
+# Router defaults
+DEFAULT_PROVIDER=claude-cli
+SUCCESS_THRESHOLD=0.8
+CONSECUTIVE_FAILURE_LIMIT=3
 ```
 
 ## Gotchas
@@ -62,3 +103,5 @@ DATABASE_URL=postgresql://claude:claude@localhost:5432/claude_proxy
 - Long prompts (>100KB) must be piped via stdin, not passed as CLI argument (ARG_MAX limit)
 - Clients (Cursor, Cline, etc.) require a non-empty API key field — the proxy ignores the Authorization header entirely
 - `--no-session-persistence` is needed to avoid writing session files per request
+- Different providers report tokens differently — each adapter normalizes to `{ tokensIn, tokensOut, costUsd }`
+- Ollama models are $0 cost, making them default for simple tasks when available

@@ -11,6 +11,9 @@ import { CostSavings } from "./components/cost-savings";
 import { CompressionStats } from "./components/compression-stats";
 import { CacheHitRate } from "./components/cache-hit-rate";
 import { BudgetGauges } from "./components/budget-gauges";
+import { PipelineSteps } from "./components/pipeline-steps";
+import { RequestStatusBreakdown } from "./components/request-status-breakdown";
+import { ClassificationCosts } from "./components/classification-costs";
 import { RecentRequests } from "./components/recent-requests";
 import {
   Select,
@@ -96,7 +99,19 @@ export default function DashboardPage() {
               <BudgetGauges data={data?.budget ?? []} />
             </div>
 
-            <RecentRequests data={data?.recent_requests ?? []} />
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+              <div className="lg:col-span-2">
+                <PipelineSteps data={data?.pipeline_steps ?? []} />
+              </div>
+              <RequestStatusBreakdown data={data?.request_status ?? []} />
+            </div>
+
+            <ClassificationCosts data={data?.classification_costs ?? []} />
+
+            <RecentRequests
+              data={data?.recent_requests ?? []}
+              detailed={data?.recent_requests_detailed ?? undefined}
+            />
           </>
         )}
       </div>

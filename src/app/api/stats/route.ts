@@ -11,6 +11,10 @@ import {
   getCompressionStats,
   getCacheHitRate,
   getBudgetUsage,
+  getPipelineStepStats,
+  getRequestStatusBreakdown,
+  getClassificationCosts,
+  getRecentRequestsDetailed,
 } from "@/lib/db/queries";
 
 const METRICS: Record<string, (days: number) => Promise<unknown>> = {
@@ -23,6 +27,9 @@ const METRICS: Record<string, (days: number) => Promise<unknown>> = {
   summary: getSummaryStats,
   compression: getCompressionStats,
   cache_hit_rate: getCacheHitRate,
+  pipeline_steps: getPipelineStepStats,
+  request_status: getRequestStatusBreakdown,
+  classification_costs: getClassificationCosts,
 };
 
 export async function GET(request: NextRequest) {
@@ -50,8 +57,12 @@ export async function GET(request: NextRequest) {
       results[key] = resolved[i];
     });
 
-    const recentRequests = await getRecentRequests(20, 0);
+    const [recentRequests, recentRequestsDetailed] = await Promise.all([
+      getRecentRequests(20, 0),
+      getRecentRequestsDetailed(20),
+    ]);
     results.recent_requests = recentRequests;
+    results.recent_requests_detailed = recentRequestsDetailed;
 
     const budget = await getBudgetUsage();
     results.budget = budget;
