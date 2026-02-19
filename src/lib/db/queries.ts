@@ -132,32 +132,49 @@ export async function getCostOverTime(days: number) {
   return db
     .select({
       date: sql<string>`date_trunc('day', ${taskLogs.createdAt})::date::text`,
+      provider: taskLogs.provider,
       model: taskLogs.modelSelected,
       cost: sql<number>`sum(${taskLogs.costUsd})::float`,
     })
     .from(taskLogs)
     .where(gte(taskLogs.createdAt, since))
-    .groupBy(sql`date_trunc('day', ${taskLogs.createdAt})::date`, taskLogs.modelSelected)
+    .groupBy(sql`date_trunc('day', ${taskLogs.createdAt})::date`, taskLogs.provider, taskLogs.modelSelected)
     .orderBy(sql`date_trunc('day', ${taskLogs.createdAt})::date`);
+}
+
+export async function getCostByProvider(days: number) {
+  const since = daysAgo(days);
+  return db
+    .select({
+      provider: taskLogs.provider,
+      cost: sql<number>`sum(${taskLogs.costUsd})::float`,
+      requests: sql<number>`count(*)::int`,
+      avgLatency: sql<number>`avg(${taskLogs.latencyMs})::int`,
+    })
+    .from(taskLogs)
+    .where(gte(taskLogs.createdAt, since))
+    .groupBy(taskLogs.provider);
 }
 
 export async function getModelBreakdown(days: number) {
   const since = daysAgo(days);
   return db
     .select({
+      provider: taskLogs.provider,
       model: taskLogs.modelSelected,
       count: sql<number>`count(*)::int`,
       cost: sql<number>`sum(${taskLogs.costUsd})::float`,
     })
     .from(taskLogs)
     .where(gte(taskLogs.createdAt, since))
-    .groupBy(taskLogs.modelSelected);
+    .groupBy(taskLogs.provider, taskLogs.modelSelected);
 }
 
 export async function getSuccessRates(days: number) {
   const since = daysAgo(days);
   return db
     .select({
+      provider: taskLogs.provider,
       model: taskLogs.modelSelected,
       category: taskLogs.taskCategory,
       total: sql<number>`count(*)::int`,
@@ -165,7 +182,7 @@ export async function getSuccessRates(days: number) {
     })
     .from(taskLogs)
     .where(gte(taskLogs.createdAt, since))
-    .groupBy(taskLogs.modelSelected, taskLogs.taskCategory);
+    .groupBy(taskLogs.provider, taskLogs.modelSelected, taskLogs.taskCategory);
 }
 
 export async function getRequestVolume(days: number) {
@@ -185,6 +202,7 @@ export async function getLatencyByModel(days: number) {
   const since = daysAgo(days);
   return db
     .select({
+      provider: taskLogs.provider,
       model: taskLogs.modelSelected,
       avgLatency: sql<number>`avg(${taskLogs.latencyMs})::int`,
       p50: sql<number>`percentile_cont(0.5) within group (order by ${taskLogs.latencyMs})::int`,
@@ -192,7 +210,38 @@ export async function getLatencyByModel(days: number) {
     })
     .from(taskLogs)
     .where(gte(taskLogs.createdAt, since))
-    .groupBy(taskLogs.modelSelected);
+    .groupBy(taskLogs.provider, taskLogs.modelSelected);
+}
+
+export async function getProviderLatency(days: number) {
+  const since = daysAgo(days);
+  return db
+    .select({
+      provider: taskLogs.provider,
+      avgLatency: sql<number>`avg(${taskLogs.latencyMs})::int`,
+      p50: sql<number>`percentile_cont(0.5) within group (order by ${taskLogs.latencyMs})::int`,
+      p95: sql<number>`percentile_cont(0.95) within group (order by ${taskLogs.latencyMs})::int`,
+    })
+    .from(taskLogs)
+    .where(gte(taskLogs.createdAt, since))
+    .groupBy(taskLogs.provider);
+}
+
+export async function getProviderComparison(days: number) {
+  const since = daysAgo(days);
+  return db
+    .select({
+      provider: taskLogs.provider,
+      totalRequests: sql<number>`count(*)::int`,
+      totalCost: sql<number>`sum(${taskLogs.costUsd})::float`,
+      avgLatency: sql<number>`avg(${taskLogs.latencyMs})::int`,
+      successRate: sql<number>`(count(*) filter (where ${taskLogs.cliSuccess} = true and (${taskLogs.heuristicScore} is null or ${taskLogs.heuristicScore} >= 40)))::float / nullif(count(*), 0)`,
+      avgTokensIn: sql<number>`avg(${taskLogs.tokensIn})::int`,
+      avgTokensOut: sql<number>`avg(${taskLogs.tokensOut})::int`,
+    })
+    .from(taskLogs)
+    .where(gte(taskLogs.createdAt, since))
+    .groupBy(taskLogs.provider);
 }
 
 export async function getRecentRequests(limit: number, offset: number) {
@@ -227,6 +276,7 @@ export async function getSummaryStats(days: number) {
       successRate: sql<number>`(count(*) filter (where ${taskLogs.cliSuccess} = true and (${taskLogs.heuristicScore} is null or ${taskLogs.heuristicScore} >= 40)))::float / nullif(count(*), 0)`,
       totalTokensSaved: sql<number>`sum(coalesce(${taskLogs.tokensBeforeCompression}, 0) - coalesce(${taskLogs.tokensAfterCompression}, 0))::int`,
       cacheHits: sql<number>`count(*) filter (where ${taskLogs.cacheHit} = true)::int`,
+      providersActive: sql<number>`count(distinct ${taskLogs.provider})::int`,
     })
     .from(taskLogs)
     .where(gte(taskLogs.createdAt, since));

@@ -11,6 +11,7 @@ interface TaskLog {
   createdAt: string;
   taskCategory: string;
   complexityScore: number;
+  provider: string;
   modelSelected: string;
   tokensIn: number;
   tokensOut: number;
@@ -122,6 +123,7 @@ export function RecentRequests({
               {detailed && <TableHead className="w-8"></TableHead>}
               <TableHead>Time</TableHead>
               <TableHead>Category</TableHead>
+              <TableHead>Provider</TableHead>
               <TableHead>Model</TableHead>
               <TableHead>Tokens</TableHead>
               <TableHead>Cost</TableHead>
@@ -152,6 +154,9 @@ export function RecentRequests({
                     </TableCell>
                     <TableCell>
                       <Badge variant="outline">{row.taskCategory}</Badge>
+                    </TableCell>
+                    <TableCell className="text-xs">
+                      {row.provider ?? "claude-cli"}
                     </TableCell>
                     <TableCell>
                       <Badge>{modelLabel(row.modelSelected)}</Badge>
@@ -197,7 +202,7 @@ export function RecentRequests({
                   </TableRow>
                   {isExpanded && detail && (
                     <TableRow key={`${row.id}-detail`}>
-                      <TableCell colSpan={detailed ? 9 : 8} className="bg-muted/30 p-3">
+                      <TableCell colSpan={detailed ? 11 : 10} className="bg-muted/30 p-3">
                         <div className="space-y-2">
                           <div className="flex gap-4 text-xs text-muted-foreground">
                             <span>Request: <code className="text-[10px]">{detail.id.slice(0, 8)}</code></span>

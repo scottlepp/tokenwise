@@ -7,8 +7,16 @@ export type TaskCategory =
   | "explain"
   | "other";
 
-export type ClaudeModel = "claude-sonnet-4-5-20250929" | "claude-haiku-4-5-20251001" | "claude-opus-4-6";
+export type ClaudeModel = "claude-sonnet-4-5-20250929" | "claude-sonnet-4-6" | "claude-haiku-4-5-20251001" | "claude-opus-4-6";
 export type ModelAlias = "opus" | "sonnet" | "haiku" | "auto";
+
+export type ProviderId =
+  | "claude-cli"
+  | "claude-api"
+  | "openai"
+  | "gemini"
+  | "ollama"
+  | string;
 
 export interface ContentPartText {
   type: "text";
@@ -117,9 +125,12 @@ export interface ChatCompletionChunk {
 }
 
 export interface RouterDecision {
-  model: ClaudeModel;
+  provider: ProviderId;
+  model: string;
   alias: string;
   reason: string;
+  category: TaskCategory;
+  complexityScore: number;
 }
 
 export interface ClassificationResult {
@@ -142,6 +153,7 @@ export interface SuccessEvaluation {
 
 export interface TaskLogInsert {
   requestId?: string;
+  provider: string;
   taskCategory: TaskCategory;
   complexityScore: number;
   promptSummary: string;
@@ -185,6 +197,9 @@ export type PipelineStep =
   | "cli_spawn"
   | "cli_streaming"
   | "cli_done"
+  | "provider_dispatch"
+  | "provider_streaming"
+  | "provider_done"
   | "tool_parse"
   | "response_sent"
   | "log_task";
