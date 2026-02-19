@@ -2,27 +2,21 @@
 
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { PieChart, Pie, Cell, ResponsiveContainer, Legend, Tooltip } from "recharts";
+import { PROVIDER_COLORS, FALLBACK_COLORS, providerLabel, shortModelLabel } from "@/lib/constants";
 
 interface ModelData {
+  provider: string;
   model: string;
   count: number;
   cost: number;
 }
 
-const COLORS = ["#8b5cf6", "#3b82f6", "#10b981", "#f59e0b", "#ef4444"];
-
-function modelLabel(model: string): string {
-  if (model.includes("opus")) return "Opus";
-  if (model.includes("sonnet")) return "Sonnet";
-  if (model.includes("haiku")) return "Haiku";
-  return model;
-}
-
 export function ModelBreakdown({ data }: { data: ModelData[] }) {
-  const chartData = data.map((d) => ({
-    name: modelLabel(d.model),
+  const chartData = data.map((d, i) => ({
+    name: `${providerLabel(d.provider)} / ${shortModelLabel(d.model)}`,
     value: d.count,
     cost: d.cost,
+    color: PROVIDER_COLORS[d.provider] ?? FALLBACK_COLORS[i % FALLBACK_COLORS.length],
   }));
 
   return (
@@ -43,8 +37,8 @@ export function ModelBreakdown({ data }: { data: ModelData[] }) {
               dataKey="value"
               label={({ name, percent }) => `${name} ${((percent ?? 0) * 100).toFixed(0)}%`}
             >
-              {chartData.map((_, i) => (
-                <Cell key={i} fill={COLORS[i % COLORS.length]} />
+              {chartData.map((entry, i) => (
+                <Cell key={i} fill={entry.color} />
               ))}
             </Pie>
             <Tooltip formatter={(value, name, props) => [

@@ -1,10 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import {
   getCostOverTime,
+  getCostByProvider,
   getModelBreakdown,
   getSuccessRates,
   getRequestVolume,
   getLatencyByModel,
+  getProviderLatency,
+  getProviderComparison,
   getRecentRequests,
   getCostSavings,
   getSummaryStats,
@@ -19,10 +22,13 @@ import {
 
 const METRICS: Record<string, (days: number) => Promise<unknown>> = {
   cost_over_time: getCostOverTime,
+  cost_by_provider: getCostByProvider,
   model_breakdown: getModelBreakdown,
   success_rates: getSuccessRates,
   request_volume: getRequestVolume,
   latency_by_model: getLatencyByModel,
+  provider_latency: getProviderLatency,
+  provider_comparison: getProviderComparison,
   cost_savings: getCostSavings,
   summary: getSummaryStats,
   compression: getCompressionStats,

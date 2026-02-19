@@ -1,4 +1,4 @@
-import { pgTable, uuid, timestamp, varchar, integer, numeric, boolean, text, index } from "drizzle-orm/pg-core";
+import { pgTable, uuid, timestamp, varchar, integer, numeric, boolean, text, index, uniqueIndex, jsonb } from "drizzle-orm/pg-core";
 
 // ── Request Logs: one row per incoming HTTP request ──
 export const requestLogs = pgTable(
@@ -65,7 +65,8 @@ export const taskLogs = pgTable(
     promptSummary: varchar("prompt_summary", { length: 500 }),
     messageCount: integer("message_count").notNull(),
 
-    // Model selection
+    // Provider + Model selection
+    provider: varchar("provider", { length: 50 }).notNull().default("claude-cli"),
     modelRequested: varchar("model_requested", { length: 100 }),
     modelSelected: varchar("model_selected", { length: 100 }).notNull(),
     routerReason: varchar("router_reason", { length: 200 }),
@@ -91,9 +92,11 @@ export const taskLogs = pgTable(
   },
   (table) => [
     index("idx_task_logs_created_at").on(table.createdAt),
+    index("idx_task_logs_provider").on(table.provider),
     index("idx_task_logs_model").on(table.modelSelected),
     index("idx_task_logs_category").on(table.taskCategory),
     index("idx_task_logs_request_id").on(table.requestId),
+    index("idx_task_logs_provider_category").on(table.provider, table.taskCategory),
   ]
 );
 
@@ -104,3 +107,41 @@ export const budgetConfig = pgTable("budget_config", {
   enabled: boolean("enabled").notNull().default(true),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
+
+export const providerConfig = pgTable("provider_config", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  providerId: varchar("provider_id", { length: 50 }).notNull().unique(),
+  displayName: varchar("display_name", { length: 100 }).notNull(),
+  enabled: boolean("enabled").notNull().default(true),
+  priority: integer("priority").notNull().default(0), // Higher = preferred when costs are equal
+  configJson: jsonb("config_json").default({}),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+// ── Models: one row per model per provider ──
+export const modelsTable = pgTable(
+  "models",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    modelId: varchar("model_id", { length: 100 }).notNull(),
+    providerId: varchar("provider_id", { length: 50 }).notNull()
+      .references(() => providerConfig.providerId),
+    displayName: varchar("display_name", { length: 100 }).notNull(),
+    tier: varchar("tier", { length: 20 }).notNull(), // economy, standard, premium
+    costPerMInputTokens: numeric("cost_per_m_input_tokens", { precision: 10, scale: 4 }).notNull(),
+    costPerMOutputTokens: numeric("cost_per_m_output_tokens", { precision: 10, scale: 4 }).notNull(),
+    maxContextTokens: integer("max_context_tokens").notNull(),
+    supportsStreaming: boolean("supports_streaming").notNull().default(true),
+    supportsTools: boolean("supports_tools").notNull().default(false),
+    supportsVision: boolean("supports_vision").notNull().default(false),
+    enabled: boolean("enabled").notNull().default(true),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index("idx_models_provider_id").on(table.providerId),
+    index("idx_models_model_id").on(table.modelId),
+    uniqueIndex("idx_models_provider_model").on(table.providerId, table.modelId),
+  ]
+);

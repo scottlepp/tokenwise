@@ -1,7 +1,4 @@
 import { NextRequest, NextResponse } from "next/server";
-import { convertMessages } from "@/lib/message-converter";
-import { spawnClaudeNonStreaming, spawnClaudeStreaming } from "@/lib/claude-cli";
-import { createStreamTransformer } from "@/lib/stream-transformer";
 import { selectModel } from "@/lib/router";
 import { evaluate } from "@/lib/success-evaluator";
 import { modelAlias } from "@/lib/config";
@@ -12,11 +9,10 @@ import {
 import { getCacheKey, getDedupKey, getFromCache, setInCache, isDuplicate, markDedup } from "@/lib/cache";
 import { compress } from "@/lib/compressor";
 import { checkBudget, downgradeModel } from "@/lib/budget";
-import { parseToolCalls } from "@/lib/tool-parser";
-import type { ChatCompletionRequest, ChatCompletionResponse, ClaudeModel, PipelineStep } from "@/lib/types";
+import { providerRegistry, initializeProviders } from "@/lib/providers";
+import type { ChatCompletionRequest, ChatCompletionResponse, PipelineStep } from "@/lib/types";
 
 // Always report this model in responses — keeps clients like Cline happy
-// regardless of which model actually handled the request
 const RESPONSE_MODEL = "claude-sonnet-4-5-20250929";
 
 /** Log a pipeline step. Fire-and-forget — never blocks the pipeline on logging failures. */
@@ -104,6 +100,9 @@ export async function POST(request: NextRequest) {
   const userAgent = request.headers.get("user-agent") ?? "";
   console.log("[completions] Incoming request from", userAgent);
 
+  // Ensure providers are initialized
+  await initializeProviders();
+
   // ── Parse request body ──
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let body: ChatCompletionRequest & Record<string, any>;
@@ -147,7 +146,6 @@ export async function POST(request: NextRequest) {
       promptPreview: lastUserText.slice(0, 500),
     });
   } catch {
-    // If DB is down, use a local UUID and continue — don't block the request
     requestId = crypto.randomUUID();
   }
 
@@ -179,18 +177,20 @@ export async function POST(request: NextRequest) {
   }
   markDedup(dedupKey);
 
-  // ── 3. Classify + Route ──
+  // ── 3. Classify + Route (cross-provider) ──
   console.log("[completions] prompt preview: %s", lastUserText.slice(0, 200));
-  let decision, category, complexityScore;
+  let decision;
   const classifyStart = Date.now();
   logStep(requestId, "classify", "started");
 
   try {
     const result = await selectModel(requestModel, body.messages);
     decision = result.decision;
-    category = result.category;
-    complexityScore = result.complexityScore;
-    const classifyDetail: Record<string, unknown> = { category, complexityScore };
+    const classifyDetail: Record<string, unknown> = {
+      provider: decision.provider,
+      category: decision.category,
+      complexityScore: decision.complexityScore,
+    };
     if (result.classificationLlm) {
       classifyDetail.llm = result.classificationLlm;
     }
@@ -198,18 +198,20 @@ export async function POST(request: NextRequest) {
   } catch {
     const { classifyTaskHeuristic } = await import("@/lib/task-classifier");
     const classification = classifyTaskHeuristic(body.messages);
-    category = classification.category;
-    complexityScore = classification.complexityScore;
     decision = {
-      model: "claude-sonnet-4-5-20250929" as ClaudeModel,
+      provider: "claude-cli",
+      model: "claude-sonnet-4-5-20250929",
       alias: "sonnet",
       reason: "Router error, defaulting to sonnet",
+      category: classification.category,
+      complexityScore: classification.complexityScore,
     };
     logStep(requestId, "classify", "error", "Router error, used heuristic fallback", Date.now() - classifyStart);
   }
 
   logStep(requestId, "route", "completed", JSON.stringify({
-    model: decision.alias, reason: decision.reason, category, complexityScore,
+    provider: decision.provider, model: decision.alias, reason: decision.reason,
+    category: decision.category, complexityScore: decision.complexityScore,
   }));
 
   // ── 3.5. Enforce minimum model for agentic clients ──
@@ -217,11 +219,12 @@ export async function POST(request: NextRequest) {
   if (isAgenticClient && decision.model === "claude-haiku-4-5-20251001") {
     console.log("[completions] upgrading from haiku to sonnet for agentic client: %s", userAgent.slice(0, 50));
     decision = {
-      model: "claude-sonnet-4-5-20250929" as ClaudeModel,
+      ...decision,
+      model: "claude-sonnet-4-5-20250929",
       alias: "sonnet",
       reason: `${decision.reason} -> upgraded to sonnet (agentic client)`,
     };
-    logStep(requestId, "route", "completed", "upgraded haiku→sonnet (agentic client)");
+    logStep(requestId, "route", "completed", "upgraded haiku->sonnet (agentic client)");
   }
 
   // ── 4. Budget check ──
@@ -233,7 +236,7 @@ export async function POST(request: NextRequest) {
     return errorResponse(budgetResult.reason, "budget_exceeded", 429);
   }
   if (budgetResult.downgrade) {
-    const downgraded = downgradeModel(decision.model) as ClaudeModel;
+    const downgraded = downgradeModel(decision.model);
     decision = {
       ...decision,
       model: downgraded,
@@ -248,8 +251,7 @@ export async function POST(request: NextRequest) {
   // ── 5. Check cache (non-streaming only) ──
   if (!streaming) {
     const cacheStart = Date.now();
-    const { systemPrompt } = convertMessages(body.messages);
-    const cacheKey = getCacheKey(decision.model, systemPrompt, body.messages);
+    const cacheKey = getCacheKey(`${decision.provider}:${decision.model}`, null, body.messages);
     const cached = getFromCache(cacheKey);
     if (cached) {
       logStep(requestId, "cache_check", "completed", "cache hit", Date.now() - cacheStart);
@@ -257,8 +259,9 @@ export async function POST(request: NextRequest) {
       try {
         await insertTaskLog({
           requestId,
-          taskCategory: category,
-          complexityScore,
+          provider: decision.provider,
+          taskCategory: decision.category,
+          complexityScore: decision.complexityScore,
           promptSummary: lastUserText.slice(0, 500),
           messageCount: body.messages.length,
           modelRequested: requestModel,
@@ -284,6 +287,7 @@ export async function POST(request: NextRequest) {
         headers: {
           "x-request-id": requestId,
           "x-cache-hit": "true",
+          "x-provider": decision.provider,
           "x-model": decision.alias,
         },
       });
@@ -294,109 +298,157 @@ export async function POST(request: NextRequest) {
   // ── 6. Compress messages ──
   const compressStart = Date.now();
   const compressionResult = compress(body.messages);
-  const { systemPrompt, prompt, hasTools } = convertMessages(compressionResult.messages, body.tools);
   const tokensSaved = compressionResult.tokensBefore - compressionResult.tokensAfter;
   logStep(requestId, "compress", "completed", JSON.stringify({
     tokensBefore: compressionResult.tokensBefore,
     tokensAfter: compressionResult.tokensAfter,
     saved: tokensSaved,
-    promptChars: prompt.length,
   }), Date.now() - compressStart);
 
-  console.log("[completions] routed to %s (%s) | model=%s | category=%s complexity=%d | tokens: %d→%d (saved %d) | prompt=%d chars",
-    decision.alias, decision.reason, decision.model, category, complexityScore,
-    compressionResult.tokensBefore, compressionResult.tokensAfter, tokensSaved,
-    prompt.length);
+  console.log("[completions] routed to %s/%s (%s) | category=%s complexity=%d | tokens: %d->%d (saved %d)",
+    decision.provider, decision.model, decision.reason,
+    decision.category, decision.complexityScore,
+    compressionResult.tokensBefore, compressionResult.tokensAfter, tokensSaved);
 
-  const cliStart = Date.now();
+  // ── 7. Get provider and dispatch ──
+  const provider = providerRegistry.get(decision.provider);
+  if (!provider) {
+    const errMsg = `Provider ${decision.provider} not available`;
+    logStep(requestId, "provider_dispatch", "error", errMsg);
+    updateRequestStatus(requestId, "error", { httpStatus: 500, errorMessage: errMsg, totalLatencyMs: Date.now() - requestStart }).catch(() => {});
+    return errorResponse(errMsg, "provider_unavailable", 500);
+  }
+
+  const dispatchStart = Date.now();
   const completionId = `chatcmpl-${crypto.randomUUID()}`;
-  const promptSummary = prompt.slice(0, 500);
+  const promptSummary = lastUserText.slice(0, 500);
 
-  // Update request to processing
   updateRequestStatus(requestId, "processing").catch(() => {});
+
+  const providerRequest = {
+    model: decision.model,
+    messages: compressionResult.messages,
+    tools: body.tools,
+    temperature: body.temperature,
+    maxTokens: body.max_tokens,
+    stream: streaming,
+  };
 
   if (streaming) {
     // ── Streaming path ──
-    logStep(requestId, "cli_spawn", "started", JSON.stringify({ model: decision.model, streaming: true }));
+    logStep(requestId, "provider_dispatch", "started", JSON.stringify({
+      provider: decision.provider, model: decision.model, streaming: true,
+    }));
 
-    const handle = spawnClaudeStreaming({
-      model: decision.model,
-      prompt,
-      systemPrompt,
-      streaming: true,
-    });
+    try {
+      const streamResult = await provider.stream(providerRequest);
 
-    logStep(requestId, "cli_spawn", "completed", `pid=${handle.child.pid}`);
-    logStep(requestId, "cli_streaming", "started");
+      logStep(requestId, "provider_streaming", "started");
 
-    let streamClosed = false;
-    const nodeToWeb = new ReadableStream<Uint8Array>({
-      start(controller) {
-        handle.stdout.on("data", (chunk: Buffer) => {
-          if (!streamClosed) {
-            controller.enqueue(new Uint8Array(chunk));
-          }
-        });
-        handle.stdout.on("end", () => {
-          if (!streamClosed) {
-            streamClosed = true;
-            controller.close();
-          }
-        });
-        handle.stdout.on("error", (err) => {
-          if (!streamClosed) {
-            streamClosed = true;
-            controller.error(err);
-          }
-        });
-      },
-      cancel() {
-        streamClosed = true;
-        handle.child.kill();
-        logStep(requestId, "cli_streaming", "error", "client cancelled stream");
-      },
-    });
+      // Log asynchronously after stream completes
+      streamResult.metadata.then(async (meta) => {
+        const dispatchDuration = Date.now() - dispatchStart;
+        const totalLatency = Date.now() - requestStart;
 
-    let resolveAccumulated: (value: { text: string; tokensIn: number; tokensOut: number; costUsd: number }) => void;
-    const accumulatedPromise = new Promise<{ text: string; tokensIn: number; tokensOut: number; costUsd: number }>((resolve) => {
-      resolveAccumulated = resolve;
-    });
+        logStep(requestId, "provider_streaming", "completed", JSON.stringify({
+          tokensIn: meta.tokensIn, tokensOut: meta.tokensOut, costUsd: meta.costUsd, responseChars: meta.text.length,
+        }), dispatchDuration);
+        logStep(requestId, "provider_done", "completed", `${dispatchDuration}ms`, dispatchDuration);
 
-    const transformer = createStreamTransformer(completionId, RESPONSE_MODEL, (acc) => {
-      resolveAccumulated!(acc);
-    }, { includeUsage: body.stream_options?.include_usage !== false, hasTools });
+        console.log("[completions] stream done in %dms | provider=%s | tokensIn=%d tokensOut=%d cost=$%s | response=%d chars",
+          dispatchDuration, decision.provider, meta.tokensIn, meta.tokensOut, meta.costUsd.toFixed(4), meta.text.length);
 
-    const outputStream = nodeToWeb.pipeThrough(transformer);
+        const evalResult = evaluate(meta.text, true, decision.category, decision.complexityScore);
 
-    // Log asynchronously after stream completes
-    accumulatedPromise.then(async (acc) => {
-      const cliDuration = Date.now() - cliStart;
-      const totalLatency = Date.now() - requestStart;
-      logStep(requestId, "cli_streaming", "completed", JSON.stringify({
-        tokensIn: acc.tokensIn, tokensOut: acc.tokensOut, costUsd: acc.costUsd, responseChars: acc.text.length,
-      }), cliDuration);
-      logStep(requestId, "cli_done", "completed", `${cliDuration}ms`, cliDuration);
+        try {
+          await insertTaskLog({
+            requestId,
+            provider: decision.provider,
+            taskCategory: decision.category,
+            complexityScore: decision.complexityScore,
+            promptSummary,
+            messageCount: body.messages.length,
+            modelRequested: requestModel,
+            modelSelected: decision.model,
+            routerReason: decision.reason,
+            tokensIn: meta.tokensIn,
+            tokensOut: meta.tokensOut,
+            costUsd: meta.costUsd.toFixed(6),
+            latencyMs: dispatchDuration,
+            streaming: true,
+            cliSuccess: evalResult.cliSuccess,
+            heuristicScore: evalResult.heuristicScore,
+            tokensBeforeCompression: compressionResult.tokensBefore,
+            tokensAfterCompression: compressionResult.tokensAfter,
+            budgetRemainingUsd: budgetResult.remainingUsd === Infinity ? undefined : budgetResult.remainingUsd.toFixed(2),
+          });
+          logStep(requestId, "log_task", "completed");
+        } catch (err) {
+          console.error("[completions] Failed to log task:", err);
+          logStep(requestId, "log_task", "error", (err as Error).message);
+        }
 
-      console.log("[completions] stream done in %dms | tokensIn=%d tokensOut=%d cost=$%s | response=%d chars",
-        cliDuration, acc.tokensIn, acc.tokensOut, acc.costUsd.toFixed(4), acc.text.length);
-      const evalResult = evaluate(acc.text, true, category, complexityScore);
+        logStep(requestId, "response_sent", "completed", `total=${totalLatency}ms`);
+        updateRequestStatus(requestId, "completed", { httpStatus: 200, totalLatencyMs: totalLatency }).catch(() => {});
+      });
 
+      return new Response(streamResult.stream, {
+        headers: {
+          "Content-Type": "text/event-stream",
+          "Cache-Control": "no-cache",
+          Connection: "keep-alive",
+          "x-request-id": requestId,
+          "x-task-id": requestId,
+          "x-provider": decision.provider,
+          "x-model": decision.alias,
+          "x-router-reason": decision.reason,
+          "x-tokens-saved": String(tokensSaved),
+        },
+      });
+    } catch (err) {
+      const errMsg = (err as Error).message;
+      const dispatchDuration = Date.now() - dispatchStart;
+      logStep(requestId, "provider_dispatch", "error", errMsg, dispatchDuration);
+      updateRequestStatus(requestId, "error", { httpStatus: 500, errorMessage: errMsg, totalLatencyMs: Date.now() - requestStart }).catch(() => {});
+      return errorResponse(errMsg, "provider_error", 500);
+    }
+  } else {
+    // ── Non-streaming path ──
+    logStep(requestId, "provider_dispatch", "started", JSON.stringify({
+      provider: decision.provider, model: decision.model, streaming: false,
+    }));
+
+    try {
+      const result = await provider.complete(providerRequest);
+
+      const dispatchDuration = Date.now() - dispatchStart;
+      logStep(requestId, "provider_done", "completed", JSON.stringify({
+        tokensIn: result.tokensIn, tokensOut: result.tokensOut, costUsd: result.costUsd,
+        responseChars: result.text.length,
+      }), dispatchDuration);
+
+      const latencyMs = Date.now() - requestStart;
+      const evalResult = evaluate(result.text, true, decision.category, decision.complexityScore);
+
+      // Log to DB
+      let loggedTaskId = requestId;
       try {
-        await insertTaskLog({
+        loggedTaskId = await insertTaskLog({
           requestId,
-          taskCategory: category,
-          complexityScore,
+          provider: decision.provider,
+          taskCategory: decision.category,
+          complexityScore: decision.complexityScore,
           promptSummary,
           messageCount: body.messages.length,
           modelRequested: requestModel,
           modelSelected: decision.model,
           routerReason: decision.reason,
-          tokensIn: acc.tokensIn,
-          tokensOut: acc.tokensOut,
-          costUsd: acc.costUsd.toFixed(6),
-          latencyMs: cliDuration,
-          streaming: true,
-          cliSuccess: evalResult.cliSuccess,
+          tokensIn: result.tokensIn,
+          tokensOut: result.tokensOut,
+          costUsd: result.costUsd.toFixed(6),
+          latencyMs,
+          streaming: false,
+          cliSuccess: true,
           heuristicScore: evalResult.heuristicScore,
           tokensBeforeCompression: compressionResult.tokensBefore,
           tokensAfterCompression: compressionResult.tokensAfter,
@@ -408,129 +460,83 @@ export async function POST(request: NextRequest) {
         logStep(requestId, "log_task", "error", (err as Error).message);
       }
 
-      logStep(requestId, "response_sent", "completed", `total=${totalLatency}ms`);
-      updateRequestStatus(requestId, "completed", { httpStatus: 200, totalLatencyMs: totalLatency }).catch(() => {});
-    });
+      const hasToolCallsInResponse = result.toolCalls && result.toolCalls.length > 0;
 
-    return new Response(outputStream, {
-      headers: {
-        "Content-Type": "text/event-stream",
-        "Cache-Control": "no-cache",
-        Connection: "keep-alive",
-        "x-request-id": requestId,
-        "x-task-id": requestId,
-        "x-model": decision.alias,
-        "x-router-reason": decision.reason,
-        "x-tokens-saved": String(tokensSaved),
-      },
-    });
-  } else {
-    // ── Non-streaming path ──
-    logStep(requestId, "cli_spawn", "started", JSON.stringify({ model: decision.model, streaming: false }));
+      if (hasToolCallsInResponse) {
+        logStep(requestId, "tool_parse", "completed", `${result.toolCalls!.length} tool calls`);
+      }
 
-    const result = await spawnClaudeNonStreaming({
-      model: decision.model,
-      prompt,
-      systemPrompt,
-      streaming: false,
-    });
-
-    const cliDuration = Date.now() - cliStart;
-    logStep(requestId, "cli_done", "completed", JSON.stringify({
-      tokensIn: result.tokensIn, tokensOut: result.tokensOut, costUsd: result.costUsd,
-      responseChars: result.text.length, isError: result.isError,
-    }), cliDuration);
-
-    const latencyMs = Date.now() - requestStart;
-    const evalResult = evaluate(result.text, !result.isError, category, complexityScore);
-
-    // Log to DB
-    let loggedTaskId = requestId;
-    try {
-      loggedTaskId = await insertTaskLog({
-        requestId,
-        taskCategory: category,
-        complexityScore,
-        promptSummary,
-        messageCount: body.messages.length,
-        modelRequested: requestModel,
-        modelSelected: decision.model,
-        routerReason: decision.reason,
-        tokensIn: result.tokensIn,
-        tokensOut: result.tokensOut,
-        costUsd: result.costUsd.toFixed(6),
-        latencyMs,
-        streaming: false,
-        cliSuccess: !result.isError,
-        heuristicScore: evalResult.heuristicScore,
-        errorMessage: result.errorMessage,
-        tokensBeforeCompression: compressionResult.tokensBefore,
-        tokensAfterCompression: compressionResult.tokensAfter,
-        budgetRemainingUsd: budgetResult.remainingUsd === Infinity ? undefined : budgetResult.remainingUsd.toFixed(2),
-      });
-      logStep(requestId, "log_task", "completed");
-    } catch (err) {
-      console.error("[completions] Failed to log task:", err);
-      logStep(requestId, "log_task", "error", (err as Error).message);
-    }
-
-    if (result.isError) {
-      logStep(requestId, "response_sent", "error", result.errorMessage);
-      updateRequestStatus(requestId, "error", { httpStatus: 500, errorMessage: result.errorMessage, totalLatencyMs: latencyMs }).catch(() => {});
-      return errorResponse(
-        result.errorMessage ?? "Claude CLI error",
-        "cli_error",
-        500
-      );
-    }
-
-    // Parse tool calls from response if tools were provided
-    const parsed = hasTools ? parseToolCalls(result.text) : null;
-    const hasToolCallsInResponse = parsed && parsed.toolCalls.length > 0;
-
-    if (hasToolCallsInResponse) {
-      logStep(requestId, "tool_parse", "completed", `${parsed!.toolCalls.length} tool calls`);
-      console.log("[completions] tool_calls detected: %d calls", parsed!.toolCalls.length);
-    }
-
-    const response: ChatCompletionResponse = {
-      id: completionId,
-      object: "chat.completion",
-      created: Math.floor(Date.now() / 1000),
-      model: RESPONSE_MODEL,
-      choices: [
-        {
-          index: 0,
-          message: hasToolCallsInResponse
-            ? { role: "assistant", content: parsed!.textContent, tool_calls: parsed!.toolCalls }
-            : { role: "assistant", content: result.text },
-          finish_reason: hasToolCallsInResponse ? "tool_calls" : "stop",
+      const response: ChatCompletionResponse = {
+        id: completionId,
+        object: "chat.completion",
+        created: Math.floor(Date.now() / 1000),
+        model: RESPONSE_MODEL,
+        choices: [
+          {
+            index: 0,
+            message: hasToolCallsInResponse
+              ? { role: "assistant", content: result.text || null, tool_calls: result.toolCalls }
+              : { role: "assistant", content: result.text },
+            finish_reason: result.finishReason,
+          },
+        ],
+        usage: {
+          prompt_tokens: result.tokensIn,
+          completion_tokens: result.tokensOut,
+          total_tokens: result.tokensIn + result.tokensOut,
         },
-      ],
-      usage: {
-        prompt_tokens: result.tokensIn,
-        completion_tokens: result.tokensOut,
-        total_tokens: result.tokensIn + result.tokensOut,
-      },
-    };
+      };
 
-    // Cache the successful response (skip if tool calls — not cacheable)
-    const { systemPrompt: sp } = convertMessages(body.messages);
-    const cacheKey = getCacheKey(decision.model, sp, body.messages);
-    setInCache(cacheKey, response);
+      // Cache the successful response
+      const cacheKey = getCacheKey(`${decision.provider}:${decision.model}`, null, body.messages);
+      setInCache(cacheKey, response);
 
-    logStep(requestId, "response_sent", "completed", `total=${latencyMs}ms`);
-    updateRequestStatus(requestId, "completed", { httpStatus: 200, totalLatencyMs: latencyMs }).catch(() => {});
+      logStep(requestId, "response_sent", "completed", `total=${latencyMs}ms`);
+      updateRequestStatus(requestId, "completed", { httpStatus: 200, totalLatencyMs: latencyMs }).catch(() => {});
 
-    return NextResponse.json(response, {
-      headers: {
-        "x-request-id": requestId,
-        "x-task-id": loggedTaskId,
-        "x-model": decision.alias,
-        "x-router-reason": decision.reason,
-        "x-tokens-saved": String(tokensSaved),
-        "x-cache-hit": "false",
-      },
-    });
+      return NextResponse.json(response, {
+        headers: {
+          "x-request-id": requestId,
+          "x-task-id": loggedTaskId,
+          "x-provider": decision.provider,
+          "x-model": decision.alias,
+          "x-router-reason": decision.reason,
+          "x-tokens-saved": String(tokensSaved),
+          "x-cache-hit": "false",
+        },
+      });
+    } catch (err) {
+      const errMsg = (err as Error).message;
+      const dispatchDuration = Date.now() - dispatchStart;
+      logStep(requestId, "provider_dispatch", "error", errMsg, dispatchDuration);
+
+      // Log the failure
+      try {
+        await insertTaskLog({
+          requestId,
+          provider: decision.provider,
+          taskCategory: decision.category,
+          complexityScore: decision.complexityScore,
+          promptSummary,
+          messageCount: body.messages.length,
+          modelRequested: requestModel,
+          modelSelected: decision.model,
+          routerReason: decision.reason,
+          tokensIn: 0,
+          tokensOut: 0,
+          costUsd: "0",
+          latencyMs: Date.now() - requestStart,
+          streaming: false,
+          cliSuccess: false,
+          heuristicScore: 0,
+          errorMessage: errMsg.slice(0, 500),
+          tokensBeforeCompression: compressionResult.tokensBefore,
+          tokensAfterCompression: compressionResult.tokensAfter,
+        });
+      } catch { /* ignore */ }
+
+      updateRequestStatus(requestId, "error", { httpStatus: 500, errorMessage: errMsg, totalLatencyMs: Date.now() - requestStart }).catch(() => {});
+      return errorResponse(errMsg, "provider_error", 500);
+    }
   }
 }

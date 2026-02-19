@@ -31,7 +31,8 @@ describe("GET /v1/models", () => {
       expect(model).toHaveProperty("id");
       expect(model).toHaveProperty("object", "model");
       expect(model).toHaveProperty("created");
-      expect(model).toHaveProperty("owned_by", "claude-proxy");
+      expect(model).toHaveProperty("owned_by");
+      expect(typeof model.owned_by).toBe("string");
     }
   });
 });

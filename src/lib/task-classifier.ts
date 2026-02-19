@@ -1,7 +1,16 @@
 import type { TaskCategory, ChatMessage, ClassificationResult, ContentPart } from "./types";
 import { spawnClaudeNonStreaming } from "./claude-cli";
 
-const LLM_CLASSIFIER_ENABLED = process.env.LLM_CLASSIFIER === "true";
+/** Runtime-configurable LLM classifier flag. Initialized from env var, toggleable via settings API. */
+let llmClassifierEnabled = process.env.LLM_CLASSIFIER === "true";
+
+export function isLlmClassifierEnabled(): boolean {
+  return llmClassifierEnabled;
+}
+
+export function setLlmClassifierEnabled(enabled: boolean): void {
+  llmClassifierEnabled = enabled;
+}
 
 function extractText(content: string | ContentPart[] | null): string {
   if (content === null) return "";
@@ -204,7 +213,7 @@ export function classifyTaskHeuristic(messages: ChatMessage[]): ClassificationRe
 
 /** Main classifier — uses LLM (haiku) if enabled, falls back to heuristic */
 export async function classifyTask(messages: ChatMessage[]): Promise<ClassificationResult> {
-  if (LLM_CLASSIFIER_ENABLED) {
+  if (llmClassifierEnabled) {
     const userMessages = messages.filter((m) => m.role === "user");
     const lastUserText = userMessages.length > 0
       ? extractText(userMessages[userMessages.length - 1].content)

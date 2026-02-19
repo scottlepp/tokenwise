@@ -1,6 +1,9 @@
 import type { Metadata } from "next";
+import { Suspense } from "react";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
+import { SidebarProvider } from "@/components/ui/sidebar";
+import { AppSidebar } from "@/components/app-sidebar";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -13,8 +16,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Claude Proxy",
-  description: "Smart Claude proxy with analytics dashboard",
+  title: "CodeWise",
+  description: "Smart LLM proxy with analytics dashboard",
 };
 
 export default function RootLayout({
@@ -27,7 +30,12 @@ export default function RootLayout({
       <body
         className={`${geistSans.variable} ${geistMono.variable} antialiased`}
       >
-        {children}
+        <SidebarProvider>
+          <Suspense>
+            <AppSidebar />
+          </Suspense>
+          {children}
+        </SidebarProvider>
       </body>
     </html>
   );

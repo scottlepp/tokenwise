@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Line, ComposedChart } from "recharts";
 
@@ -34,7 +35,10 @@ export function ClassificationCosts({ data }: { data: ClassificationCostData[] }
       <CardContent>
         {chartData.length === 0 ? (
           <div className="text-center py-8 text-muted-foreground text-sm">
-            No LLM classification data yet. Enable with LLM_CLASSIFIER=true
+            No LLM classification data yet. Enable in{" "}
+            <Link href="/settings" className="underline text-foreground hover:text-primary">
+              Settings &gt; General
+            </Link>.
           </div>
         ) : (
           <ResponsiveContainer width="100%" height={250}>
