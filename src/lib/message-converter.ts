@@ -16,7 +16,7 @@ export interface ConvertedMessages {
   hasTools: boolean;
 }
 
-function formatToolDefinitions(tools: ToolDefinition[]): string {
+function formatToolDefinitions(tools: ToolDefinition[], toolChoice?: string | { type: string; function?: { name: string } }): string {
   const lines = ["# Available Tools", ""];
   for (const tool of tools) {
     lines.push(`## ${tool.function.name}`);
@@ -39,6 +39,17 @@ function formatToolDefinitions(tools: ToolDefinition[]): string {
   lines.push("You may include text before or after tool calls. You may make multiple tool calls in one response.");
   lines.push("After each tool call, you will receive the result and can continue.");
   lines.push("");
+
+  // Enforce tool_choice constraints
+  const choiceType = typeof toolChoice === "string" ? toolChoice : toolChoice?.type;
+  if (choiceType === "required" || choiceType === "any") {
+    lines.push("IMPORTANT: You MUST use at least one tool in your response. Do NOT respond with only text — always include a <tool_call> block.");
+    lines.push("");
+  } else if (typeof toolChoice === "object" && toolChoice?.function?.name) {
+    lines.push(`IMPORTANT: You MUST call the tool "${toolChoice.function.name}" in your response.`);
+    lines.push("");
+  }
+
   return lines.join("\n");
 }
 
@@ -68,7 +79,7 @@ function formatMessage(msg: ChatMessage): string {
   return extractText(msg.content);
 }
 
-export function convertMessages(messages: ChatMessage[], tools?: ToolDefinition[]): ConvertedMessages {
+export function convertMessages(messages: ChatMessage[], tools?: ToolDefinition[], toolChoice?: string | { type: string; function?: { name: string } }): ConvertedMessages {
   const systemMessages: string[] = [];
   const conversationMessages: ChatMessage[] = [];
   const hasTools = Array.isArray(tools) && tools.length > 0;
@@ -83,7 +94,7 @@ export function convertMessages(messages: ChatMessage[], tools?: ToolDefinition[
 
   // Prepend tool definitions to system prompt if tools are provided
   if (hasTools) {
-    systemMessages.unshift(formatToolDefinitions(tools!));
+    systemMessages.unshift(formatToolDefinitions(tools!, toolChoice));
   }
 
   const systemPrompt = systemMessages.length > 0 ? systemMessages.join("\n\n") : null;

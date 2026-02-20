@@ -94,7 +94,7 @@ export function createGeminiSseTransformer(
     if (onDoneCalled) return;
     onDoneCalled = true;
     try {
-      callOnDone();
+      onDone(accumulated);
     } catch (err) {
       console.error("[stream-transformer] Error in onDone callback:", err);
     }

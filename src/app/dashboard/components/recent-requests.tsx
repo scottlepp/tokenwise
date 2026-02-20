@@ -5,6 +5,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { shortModelLabel } from "@/lib/constants";
 
 interface TaskLog {
   id: string;
@@ -13,6 +14,7 @@ interface TaskLog {
   complexityScore: number;
   provider: string;
   modelSelected: string;
+  modelDisplayName?: string | null;
   tokensIn: number;
   tokensOut: number;
   costUsd: string;
@@ -46,12 +48,7 @@ interface DetailedRequest {
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
-function modelLabel(model: string): string {
-  if (model.includes("opus")) return "Opus";
-  if (model.includes("sonnet")) return "Sonnet";
-  if (model.includes("haiku")) return "Haiku";
-  return model;
-}
+const modelLabel = shortModelLabel;
 
 const STEP_STATUS_COLORS: Record<string, string> = {
   completed: "bg-green-50 text-green-700 border-green-200",
@@ -172,7 +169,7 @@ export function RecentRequests({
                       )}
                     </TableCell>
                     <TableCell>
-                      <Badge>{modelLabel(row.modelSelected)}</Badge>
+                      <Badge title={row.modelSelected}>{row.modelDisplayName ?? modelLabel(row.modelSelected)}</Badge>
                       {row.cacheHit && <Badge variant="secondary" className="ml-1">cache</Badge>}
                     </TableCell>
                     <TableCell className="font-mono text-xs">

@@ -72,7 +72,7 @@ export interface NonStreamingResult {
 export function spawnClaudeNonStreaming(options: CliOptions): Promise<NonStreamingResult> {
   return new Promise((resolve, reject) => {
     const args = buildArgs(options);
-    console.log("[claude-cli] non-streaming spawn: claude", args.map((a, i) => i === 1 && a !== "-" ? `"${a.slice(0, 80)}..."` : a).join(" "));
+    console.log("[claude-cli] non-streaming spawn: claude -p [%d chars] --model %s", options.prompt.length, options.model);
     const child = spawn("claude", args, {
       stdio: [options.prompt.length > LONG_PROMPT_THRESHOLD ? "pipe" : "ignore", "pipe", "pipe"],
       env: { ...process.env },
@@ -198,7 +198,7 @@ export interface StreamingHandle {
 
 export function spawnClaudeStreaming(options: CliOptions): StreamingHandle {
   const args = buildArgs(options);
-  console.log("[claude-cli] streaming spawn: claude", args.map((a, i) => i === 1 && a !== "-" ? `"${a.slice(0, 80)}..."` : a).join(" "));
+  console.log("[claude-cli] streaming spawn: claude -p [%d chars] --model %s", options.prompt.length, options.model);
   const child = spawn("claude", args, {
     stdio: [options.prompt.length > LONG_PROMPT_THRESHOLD ? "pipe" : "ignore", "pipe", "pipe"],
     env: { ...process.env },

@@ -11,7 +11,7 @@ export default function DashboardLayout({
   children: React.ReactNode;
 }) {
   return (
-    <SidebarInset>
+    <SidebarInset className="min-w-0 w-0 flex-1">
       <header className="flex h-14 shrink-0 items-center gap-2 border-b px-4">
         <SidebarTrigger className="-ml-1" />
         <Separator orientation="vertical" className="mr-2 !h-4" />
@@ -20,7 +20,7 @@ export default function DashboardLayout({
           <TimeRangeSelector />
         </Suspense>
       </header>
-      <main className="flex-1 p-6">
+      <main className="flex-1 p-6 min-w-0 overflow-x-hidden">
         {children}
       </main>
     </SidebarInset>

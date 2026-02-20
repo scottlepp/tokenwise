@@ -109,13 +109,17 @@ function calculateComplexity(
   const complexMatches = text.match(COMPLEX_KEYWORDS);
   if (complexMatches) score += complexMatches.length * 8;
 
-  // Simple keywords
-  const simpleMatches = text.match(SIMPLE_KEYWORDS);
-  if (simpleMatches) score -= simpleMatches.length * 5;
+  // Simple keywords — strong signal for trivial tasks
+  const simpleMatches = lastUserText.match(SIMPLE_KEYWORDS);
+  if (simpleMatches) score -= simpleMatches.length * 8;
 
-  // Conversation turns — mild signal, long conversations don't necessarily need opus
+  // Very short last user message is a strong signal for simplicity
+  if (lastUserText.length < 50) score -= 15;
+  else if (lastUserText.length < 150) score -= 5;
+
+  // Conversation turns — very mild signal, agentic clients always have many turns
   const turns = messages.filter((m) => m.role === "user").length;
-  score += Math.min(turns * 2, 10); // capped at 10
+  score += Math.min(turns * 1, 5); // further reduced weight, capped at 5
 
   // System prompt — don't penalize agentic tools that always have long system prompts
   // Only count if it's NOT tool-definition heavy
@@ -131,19 +135,27 @@ const VALID_CATEGORIES = new Set<TaskCategory>([
   "simple_qa", "code_gen", "code_review", "debug", "refactor", "explain", "other",
 ]);
 
-const CLASSIFICATION_PROMPT = `Classify this coding task. Return ONLY a JSON object, no other text.
+const CLASSIFICATION_PROMPT = `Classify the user's coding task. Return ONLY valid JSON, no other text.
 
 Categories: simple_qa, code_gen, code_review, debug, refactor, explain, other
-Complexity: 0-100 (0=trivial, 30=simple file edit, 50=moderate feature, 70=complex multi-file, 90=architectural)
 
-Guidelines for complexity:
-- 0-20: trivial questions, greetings, simple lookups
-- 21-45: single file edits, simple bug fixes, writing one function
+Complexity 0-100:
+- 0-10: greetings, trivial questions ("say hello", "what is 2+2", "hi")
+- 11-25: simple lookups, explain a concept, one-liner answers
+- 26-45: single file edits, simple bug fixes, write one small function
 - 46-65: multi-file changes, moderate features, debugging with investigation
 - 66-80: complex features, refactoring across modules, system design
 - 81-100: architectural changes, distributed systems, security audits
 
-Respond with: {"category":"<category>","complexity":<number>}`;
+Examples:
+- "say hello" → {"category":"simple_qa","complexity":5}
+- "what is a closure?" → {"category":"explain","complexity":15}
+- "fix this typo" → {"category":"debug","complexity":20}
+- "add a login button" → {"category":"code_gen","complexity":35}
+- "implement OAuth" → {"category":"code_gen","complexity":60}
+- "design a distributed cache" → {"category":"other","complexity":85}
+
+Respond with ONLY a JSON object like the examples above.`;
 
 async function classifyWithLLM(userText: string, messageCount: number, hasTools: boolean): Promise<ClassificationResult | null> {
   // Build a compact summary — don't send the whole conversation
@@ -170,7 +182,8 @@ async function classifyWithLLM(userText: string, messageCount: number, hasTools:
 
     const parsed = JSON.parse(jsonMatch[0]);
     const category = VALID_CATEGORIES.has(parsed.category) ? parsed.category as TaskCategory : "other";
-    const complexity = Math.max(0, Math.min(100, Math.round(Number(parsed.complexity) || 50)));
+    const rawComplexity = Number(parsed.complexity);
+    const complexity = Math.max(0, Math.min(100, Math.round(isNaN(rawComplexity) ? 50 : rawComplexity)));
 
     console.log("[classifier] LLM (haiku): category=%s complexity=%d | cost=$%s | latency=%dms | input=%d chars",
       category, complexity, result.costUsd.toFixed(4), latencyMs, prompt.length);

@@ -1,6 +1,6 @@
 import { NextRequest } from "next/server";
 import { getActiveRequests } from "@/lib/active-requests";
-import { getRecentTaskLogs } from "@/lib/db/queries";
+import { getActivityFeed } from "@/lib/db/queries";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -8,10 +8,11 @@ export const runtime = "nodejs";
 export async function GET(_request: NextRequest) {
   const encoder = new TextEncoder();
 
+  let active = true;
+  let interval: ReturnType<typeof setInterval> | null = null;
+
   const stream = new ReadableStream({
     async start(controller) {
-      let active = true;
-
       const send = (data: unknown) => {
         if (!active) return;
         try {
@@ -22,28 +23,26 @@ export async function GET(_request: NextRequest) {
       };
 
       // Send initial snapshot
-      const recent = await getRecentTaskLogs(20).catch(() => []);
-      send({ type: "snapshot", active: getActiveRequests(), recent });
+      const feed = await getActivityFeed(30).catch(() => []);
+      send({ type: "snapshot", active: getActiveRequests(), feed });
 
-      // Poll every 500ms
-      const interval = setInterval(async () => {
+      // Poll every 1s
+      interval = setInterval(async () => {
         if (!active) {
-          clearInterval(interval);
+          if (interval) clearInterval(interval);
           return;
         }
         try {
-          const recentUpdated = await getRecentTaskLogs(20).catch(() => []);
-          send({ type: "snapshot", active: getActiveRequests(), recent: recentUpdated });
+          const updatedFeed = await getActivityFeed(30).catch(() => []);
+          send({ type: "snapshot", active: getActiveRequests(), feed: updatedFeed });
         } catch {
           // ignore
         }
-      }, 500);
-
-      // Cleanup on close
-      return () => {
-        active = false;
-        clearInterval(interval);
-      };
+      }, 1000);
+    },
+    cancel() {
+      active = false;
+      if (interval) clearInterval(interval);
     },
   });
 

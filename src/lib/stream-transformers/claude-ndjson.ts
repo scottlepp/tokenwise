@@ -9,6 +9,9 @@ export interface StreamAccumulator {
   costUsd: number;
 }
 
+const TOOL_OPEN_TAG = "<tool_call>";
+const TOOL_CLOSE_TAG = "</tool_call>";
+
 export function createClaudeNdjsonTransformer(
   completionId: string,
   model: string,
@@ -24,6 +27,12 @@ export function createClaudeNdjsonTransformer(
   let sentStop = false;
   let gotResult = false;
   let onDoneCalled = false;
+
+  // Tool call in-stream detection state
+  let toolCallMode = false;
+  let toolCallBuffer = "";
+  let pendingTextBuffer = "";
+  let toolCallIndex = 0;
 
   function emit(
     controller: TransformStreamDefaultController<Uint8Array>,
@@ -54,13 +63,122 @@ export function createClaudeNdjsonTransformer(
 
   let streamedTextLength = 0;
 
-  function streamText(controller: TransformStreamDefaultController<Uint8Array>, text: string) {
-    emitRole(controller);
+  function streamContentChunks(controller: TransformStreamDefaultController<Uint8Array>, text: string) {
     const chunkSize = 20;
     for (let i = 0; i < text.length; i += chunkSize) {
       emit(controller, { content: text.slice(i, i + chunkSize) }, null);
     }
     streamedTextLength += text.length;
+  }
+
+  function streamText(controller: TransformStreamDefaultController<Uint8Array>, text: string) {
+    emitRole(controller);
+    streamContentChunks(controller, text);
+  }
+
+  /** Parse a complete <tool_call>...</tool_call> block and emit as OpenAI tool_calls delta */
+  function emitToolCallFromBuffer(controller: TransformStreamDefaultController<Uint8Array>, block: string) {
+    const match = block.match(/<tool_call>\s*([\s\S]*?)\s*<\/tool_call>/);
+    if (!match) return;
+
+    try {
+      const parsed = JSON.parse(match[1]);
+      const name = parsed.name;
+      const args = parsed.arguments ?? {};
+      const argsStr = typeof args === "string" ? args : JSON.stringify(args);
+      const callId = `call_${crypto.randomUUID().replace(/-/g, "").slice(0, 24)}`;
+
+      emitRole(controller);
+
+      // Emit tool call name
+      emit(controller, {
+        tool_calls: [{
+          index: toolCallIndex,
+          id: callId,
+          type: "function" as const,
+          function: { name, arguments: "" },
+        }],
+      }, null);
+
+      // Emit tool call arguments in chunks
+      const argChunkSize = 100;
+      for (let i = 0; i < argsStr.length; i += argChunkSize) {
+        emit(controller, {
+          tool_calls: [{
+            index: toolCallIndex,
+            function: { arguments: argsStr.slice(i, i + argChunkSize) },
+          }],
+        }, null);
+      }
+
+      toolCallIndex++;
+    } catch {
+      // Malformed tool call JSON — emit as regular text
+      console.warn("[claude-ndjson] Failed to parse tool call, emitting as text");
+      emitRole(controller);
+      streamContentChunks(controller, block);
+    }
+  }
+
+  /** Stream text with in-stream <tool_call> detection when hasTools is true */
+  function streamTextToolAware(controller: TransformStreamDefaultController<Uint8Array>, text: string) {
+    pendingTextBuffer += text;
+
+    while (pendingTextBuffer.length > 0) {
+      if (toolCallMode) {
+        // Inside a <tool_call> block — accumulate into toolCallBuffer
+        const closeIdx = pendingTextBuffer.indexOf(TOOL_CLOSE_TAG);
+        if (closeIdx === -1) {
+          // No closing tag yet — buffer everything
+          toolCallBuffer += pendingTextBuffer;
+          pendingTextBuffer = "";
+        } else {
+          // Found closing tag — extract the complete tool call
+          const endOfClose = closeIdx + TOOL_CLOSE_TAG.length;
+          toolCallBuffer += pendingTextBuffer.slice(0, endOfClose);
+          pendingTextBuffer = pendingTextBuffer.slice(endOfClose);
+          toolCallMode = false;
+
+          // Parse and emit the tool call
+          emitToolCallFromBuffer(controller, toolCallBuffer);
+          toolCallBuffer = "";
+        }
+      } else {
+        // Normal text mode — look for <tool_call> opening
+        const openIdx = pendingTextBuffer.indexOf(TOOL_OPEN_TAG);
+        if (openIdx === -1) {
+          // No tool call tag found. Hold back the last (TOOL_OPEN_TAG.length - 1)
+          // characters in case they're the start of a partial tag across chunks.
+          const safeLen = pendingTextBuffer.length - (TOOL_OPEN_TAG.length - 1);
+          if (safeLen > 0) {
+            const safe = pendingTextBuffer.slice(0, safeLen);
+            pendingTextBuffer = pendingTextBuffer.slice(safeLen);
+            emitRole(controller);
+            streamContentChunks(controller, safe);
+          }
+          break; // Wait for more data
+        } else {
+          // Found <tool_call> — emit any text before it, then enter tool call mode
+          if (openIdx > 0) {
+            const before = pendingTextBuffer.slice(0, openIdx);
+            emitRole(controller);
+            streamContentChunks(controller, before);
+          }
+          toolCallMode = true;
+          toolCallBuffer = TOOL_OPEN_TAG;
+          pendingTextBuffer = pendingTextBuffer.slice(openIdx + TOOL_OPEN_TAG.length);
+        }
+      }
+    }
+  }
+
+  function handleText(controller: TransformStreamDefaultController<Uint8Array>, text: string) {
+    accumulated.text += text;
+    if (options?.hasTools) {
+      streamTextToolAware(controller, text);
+    } else {
+      streamText(controller, text);
+    }
   }
 
   function handle(event: Record<string, unknown>, controller: TransformStreamDefaultController<Uint8Array>) {
@@ -76,8 +194,7 @@ export function createClaudeNdjsonTransformer(
       if (content) {
         for (const block of content) {
           if (block.type === "text" && typeof block.text === "string") {
-            accumulated.text += block.text;
-            streamText(controller, block.text);
+            handleText(controller, block.text);
           }
         }
       }
@@ -112,8 +229,7 @@ export function createClaudeNdjsonTransformer(
       }
 
       if (!accumulated.text && typeof event.result === "string") {
-        accumulated.text = event.result;
-        streamText(controller, event.result);
+        handleText(controller, event.result);
       }
 
       if (!options?.hasTools) {
@@ -123,6 +239,10 @@ export function createClaudeNdjsonTransformer(
           total_tokens: accumulated.tokensIn + accumulated.tokensOut,
         } : undefined;
         emit(controller, {}, "stop", usage);
+        // Resolve metadata immediately on the result event — don't wait for
+        // flush(), which may be blocked by downstream back-pressure or a
+        // client disconnect that stalls the pipeline.
+        callOnDone();
       }
 
     // --- Raw Anthropic API format (compatibility) ---
@@ -136,8 +256,7 @@ export function createClaudeNdjsonTransformer(
     } else if (type === "content_block_delta") {
       const delta = event.delta as Record<string, string> | undefined;
       if (delta?.type === "text_delta" && delta.text) {
-        accumulated.text += delta.text;
-        streamText(controller, delta.text);
+        handleText(controller, delta.text);
       }
     } else if (type === "message_delta") {
       const usage = event.usage as Record<string, number> | undefined;
@@ -155,6 +274,11 @@ export function createClaudeNdjsonTransformer(
     if (onDoneCalled) return;
     onDoneCalled = true;
     try {
+      // Strip tool call XML from accumulated text for clean logging
+      if (options?.hasTools && toolCallIndex > 0) {
+        const parsed = parseToolCalls(accumulated.text);
+        accumulated.text = parsed.textContent ?? "";
+      }
       onDone(accumulated);
     } catch (err) {
       console.error("[claude-ndjson] Error in onDone callback:", err);
@@ -189,40 +313,54 @@ export function createClaudeNdjsonTransformer(
         }
       }
 
-      if (options?.hasTools && accumulated.text) {
-        const parsed = parseToolCalls(accumulated.text);
-
-        if (parsed.toolCalls.length > 0) {
-          for (let i = 0; i < parsed.toolCalls.length; i++) {
-            const tc = parsed.toolCalls[i];
-            emit(controller, {
-              tool_calls: [{
-                index: i,
-                id: tc.id,
-                type: "function" as const,
-                function: {
-                  name: tc.function.name,
-                  arguments: tc.function.arguments,
-                },
-              }],
-            }, null);
-          }
-
-          const usage = options?.includeUsage !== false ? {
-            prompt_tokens: accumulated.tokensIn,
-            completion_tokens: accumulated.tokensOut,
-            total_tokens: accumulated.tokensIn + accumulated.tokensOut,
-          } : undefined;
-          emit(controller, {}, "tool_calls", usage);
-        } else {
-          const usage = options?.includeUsage !== false ? {
-            prompt_tokens: accumulated.tokensIn,
-            completion_tokens: accumulated.tokensOut,
-            total_tokens: accumulated.tokensIn + accumulated.tokensOut,
-          } : undefined;
-          emit(controller, {}, "stop", usage);
+      // Flush any pending tool-aware buffers
+      if (options?.hasTools) {
+        if (toolCallMode && toolCallBuffer) {
+          // Incomplete tool call at end of stream — try to parse it anyway
+          const withClose = toolCallBuffer.includes(TOOL_CLOSE_TAG)
+            ? toolCallBuffer
+            : toolCallBuffer + TOOL_CLOSE_TAG;
+          emitToolCallFromBuffer(controller, withClose);
+          toolCallBuffer = "";
+          toolCallMode = false;
         }
-      } else if (options?.hasTools && gotResult) {
+        if (pendingTextBuffer) {
+          // Remaining held-back text — emit it
+          emitRole(controller);
+          streamContentChunks(controller, pendingTextBuffer);
+          pendingTextBuffer = "";
+        }
+
+        // Safety fallback: if no tool calls were emitted in-stream, re-check accumulated text
+        if (toolCallIndex === 0 && accumulated.text) {
+          const parsed = parseToolCalls(accumulated.text);
+          if (parsed.toolCalls.length > 0) {
+            for (let i = 0; i < parsed.toolCalls.length; i++) {
+              const tc = parsed.toolCalls[i];
+              emit(controller, {
+                tool_calls: [{
+                  index: i,
+                  id: tc.id,
+                  type: "function" as const,
+                  function: {
+                    name: tc.function.name,
+                    arguments: tc.function.arguments,
+                  },
+                }],
+              }, null);
+            }
+            toolCallIndex = parsed.toolCalls.length;
+          }
+        }
+
+        const finishReason = toolCallIndex > 0 ? "tool_calls" : "stop";
+        const usage = options?.includeUsage !== false ? {
+          prompt_tokens: accumulated.tokensIn,
+          completion_tokens: accumulated.tokensOut,
+          total_tokens: accumulated.tokensIn + accumulated.tokensOut,
+        } : undefined;
+        emit(controller, {}, finishReason, usage);
+      } else if (!sentStop && gotResult) {
         const usage = options?.includeUsage !== false ? {
           prompt_tokens: accumulated.tokensIn,
           completion_tokens: accumulated.tokensOut,

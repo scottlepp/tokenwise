@@ -11,7 +11,7 @@ import { compress } from "@/lib/compressor";
 import { checkBudget, downgradeModel } from "@/lib/budget";
 import { providerRegistry, initializeProviders } from "@/lib/providers";
 import type { ChatCompletionRequest, ChatCompletionResponse, PipelineStep } from "@/lib/types";
-import { registerRequest, completeRequest, updateTokens } from "@/lib/active-requests";
+import { registerRequest, completeRequest, updateTokens, appendChunk } from "@/lib/active-requests";
 import type { ClaudeCliPersistentProvider } from "@/lib/providers/claude-cli-persistent";
 
 // RESPONSE_MODEL is imported from @/lib/config — keeps clients like Cline happy
@@ -117,7 +117,6 @@ async function handleFeedback(
 export async function POST(request: NextRequest) {
   const requestStart = Date.now();
   const userAgent = request.headers.get("user-agent") ?? "";
-  console.log("[completions] Incoming request from", userAgent);
 
   // Ensure providers are initialized
   await initializeProviders();
@@ -132,9 +131,9 @@ export async function POST(request: NextRequest) {
   }
 
   const toolCount = Array.isArray(body.tools) ? body.tools.length : 0;
-  const toolChoice = body.tool_choice ?? "none";
-  console.log("[completions] model=%s stream=%s messages=%d tools=%d tool_choice=%s",
-    body.model, body.stream, body.messages?.length ?? 0, toolCount, JSON.stringify(toolChoice));
+  // Pass through tool_choice from the client. Only default to "none" when no tools are present,
+  // so agentic clients (Cline) that send tool_choice="auto" or "required" work correctly.
+  const toolChoice = body.tool_choice ?? (toolCount > 0 ? "auto" : "none");
 
   if (!body.messages || !Array.isArray(body.messages) || body.messages.length === 0) {
     return errorResponse("messages array is required and must not be empty", "invalid_messages", 400);
@@ -144,14 +143,27 @@ export async function POST(request: NextRequest) {
   const streaming = body.stream === true;
 
   // Extract last user message text (used in multiple places)
+  function extractText(msg: { content: unknown }): string {
+    if (typeof msg.content === "string") return msg.content;
+    if (Array.isArray(msg.content))
+      return msg.content.filter((p: { type: string }) => p.type === "text").map((p: { text: string }) => p.text).join("");
+    return "";
+  }
+
   const lastUserMsg = [...body.messages].reverse().find((m) => m.role === "user");
-  const lastUserText = lastUserMsg
-    ? typeof lastUserMsg.content === "string"
-      ? lastUserMsg.content
-      : Array.isArray(lastUserMsg.content)
-        ? lastUserMsg.content.filter((p) => p.type === "text").map((p) => (p as { text: string }).text).join("")
-        : ""
-    : "";
+  const lastUserText = lastUserMsg ? extractText(lastUserMsg) : "";
+
+  // For prompt preview, skip system/error messages from agentic clients
+  const promptPreviewText = (() => {
+    const reversed = [...body.messages].reverse();
+    for (const m of reversed) {
+      if (m.role !== "user") continue;
+      const t = extractText(m);
+      if (/^\[ERROR\]|^# Reminder:|^<feedback>/.test(t.trim())) continue;
+      return t;
+    }
+    return lastUserText;
+  })();
 
   // ── Create request log ──
   let requestId: string;
@@ -197,7 +209,6 @@ export async function POST(request: NextRequest) {
   markDedup(dedupKey);
 
   // ── 3. Classify + Route (cross-provider) ──
-  console.log("[completions] prompt preview: %s", lastUserText.slice(0, 200));
   let decision;
   const classifyStart = Date.now();
   logStep(requestId, "classify", "started");
@@ -234,9 +245,13 @@ export async function POST(request: NextRequest) {
   }));
 
   // ── 3.5. Enforce minimum model for agentic clients ──
+  // Agentic clients (Cline, Aider, etc.) always need at least sonnet.
+  // Cline uses its own XML-based tool protocol (attempt_completion, read_file, etc.)
+  // embedded in message content (NOT in OpenAI tools[]), and haiku is too unreliable
+  // at following these protocols, causing ERROR retry loops that waste tokens.
   const isAgenticClient = /cline|aider|continue|copilot/i.test(userAgent);
   if (isAgenticClient && decision.model === "claude-haiku-4-5-20251001") {
-    console.log("[completions] upgrading from haiku to sonnet for agentic client: %s", userAgent.slice(0, 50));
+    console.log("[completions]    → agentic client upgrade: haiku → sonnet (agentic client always needs sonnet)");
     decision = {
       ...decision,
       model: "claude-sonnet-4-5-20250929",
@@ -247,9 +262,11 @@ export async function POST(request: NextRequest) {
   }
 
   // ── 4. Budget check ──
+  console.log("[completions] 4. BUDGET CHECK");
   const budgetStart = Date.now();
   const budgetResult = await checkBudget();
   if (!budgetResult.allowed) {
+    console.log("[completions]    → BLOCKED: %s", budgetResult.reason);
     logStep(requestId, "budget_check", "error", budgetResult.reason, Date.now() - budgetStart);
     updateRequestStatus(requestId, "error", { httpStatus: 429, errorMessage: budgetResult.reason, totalLatencyMs: Date.now() - requestStart }).catch(() => {});
     return errorResponse(budgetResult.reason, "budget_exceeded", 429);
@@ -262,6 +279,10 @@ export async function POST(request: NextRequest) {
       alias: modelAlias(downgraded),
       reason: `${decision.reason} -> downgraded due to budget (${budgetResult.reason})`,
     };
+    console.log("[completions]    → downgraded to %s (%s)", decision.alias, budgetResult.reason);
+  } else {
+    const remaining = budgetResult.remainingUsd === Infinity ? "unlimited" : `$${budgetResult.remainingUsd.toFixed(2)} remaining`;
+    console.log("[completions]    → OK (%s)", remaining);
   }
   logStep(requestId, "budget_check", "completed", JSON.stringify({
     allowed: true, downgrade: budgetResult.downgrade, remainingUsd: budgetResult.remainingUsd,
@@ -269,10 +290,12 @@ export async function POST(request: NextRequest) {
 
   // ── 5. Check cache (non-streaming only) ──
   if (!streaming) {
+    console.log("[completions] 5. CACHE CHECK");
     const cacheStart = Date.now();
     const cacheKey = getCacheKey(`${decision.provider}:${decision.model}`, null, body.messages);
     const cached = getFromCache(cacheKey);
     if (cached) {
+      console.log("[completions]    → HIT — returning cached response");
       logStep(requestId, "cache_check", "completed", "cache hit", Date.now() - cacheStart);
 
       try {
@@ -311,25 +334,26 @@ export async function POST(request: NextRequest) {
         },
       });
     }
+    console.log("[completions]    → MISS (%dms)", Date.now() - cacheStart);
     logStep(requestId, "cache_check", "completed", "cache miss", Date.now() - cacheStart);
   }
 
   // ── 6. Compress messages ──
+  console.log("[completions] 6. COMPRESS");
   const compressStart = Date.now();
   const compressionResult = compress(body.messages);
   const tokensSaved = compressionResult.tokensBefore - compressionResult.tokensAfter;
+  console.log("[completions]    → tokens %d → %d (saved %d) (%dms)",
+    compressionResult.tokensBefore, compressionResult.tokensAfter, tokensSaved, Date.now() - compressStart);
   logStep(requestId, "compress", "completed", JSON.stringify({
     tokensBefore: compressionResult.tokensBefore,
     tokensAfter: compressionResult.tokensAfter,
     saved: tokensSaved,
   }), Date.now() - compressStart);
 
-  console.log("[completions] routed to %s/%s (%s) | category=%s complexity=%d | tokens: %d->%d (saved %d)",
-    decision.provider, decision.model, decision.reason,
-    decision.category, decision.complexityScore,
-    compressionResult.tokensBefore, compressionResult.tokensAfter, tokensSaved);
-
   // ── 7. Get provider and dispatch ──
+  console.log("[completions] 7. DISPATCH → %s / %s  stream=%s",
+    decision.provider, decision.model, streaming);
   const provider = providerRegistry.get(decision.provider);
   if (!provider) {
     const errMsg = `Provider ${decision.provider} not available`;
@@ -348,6 +372,7 @@ export async function POST(request: NextRequest) {
     model: decision.model,
     messages: compressionResult.messages,
     tools: body.tools,
+    toolChoice: toolChoice,  // use corrected value (not raw body.tool_choice which may be undefined)
     temperature: body.temperature,
     maxTokens: body.max_tokens,
     stream: streaming,
@@ -372,6 +397,7 @@ export async function POST(request: NextRequest) {
 
     try {
       const streamResult = await provider.stream(providerRequest);
+      console.log("[completions]    → stream opened (%dms to first byte)", Date.now() - dispatchStart);
 
       logStep(requestId, "provider_streaming", "started");
 
@@ -381,10 +407,40 @@ export async function POST(request: NextRequest) {
         provider: decision.provider,
         model: decision.alias || decision.model,
         category: decision.category,
-        promptPreview: lastUserText.slice(0, 200),
+        promptPreview: promptPreviewText.slice(0, 200),
         tokensIn: 0,
         tokensOut: 0,
       });
+
+      // Wrap the stream to intercept text chunks for live activity display
+      let firstChunkLogged = false;
+      let chunkCount = 0;
+      const activityTracker = new TransformStream<Uint8Array, Uint8Array>({
+        transform(chunk, controller) {
+          controller.enqueue(chunk);
+          chunkCount++;
+          // Parse SSE chunks to extract text for appendChunk
+          try {
+            const text = new TextDecoder().decode(chunk);
+            for (const line of text.split("\n")) {
+              if (!line.startsWith("data: ") || line === "data: [DONE]") continue;
+              const parsed = JSON.parse(line.slice(6));
+              const content = parsed.choices?.[0]?.delta?.content;
+              if (content) {
+                if (!firstChunkLogged) {
+                  console.log("[completions]    → first token received (%dms)", Date.now() - dispatchStart);
+                  firstChunkLogged = true;
+                }
+                appendChunk(requestId, content);
+              }
+            }
+          } catch { /* ignore parse errors */ }
+        },
+        flush() {
+          console.log("[completions]    → stream closed (%d SSE chunks total)", chunkCount);
+        },
+      });
+      const trackedStream = streamResult.stream.pipeThrough(activityTracker);
 
       // Log asynchronously after stream completes
       // Capture dispatch info right after the provider call (before async metadata)
@@ -408,9 +464,9 @@ export async function POST(request: NextRequest) {
         }), dispatchDuration);
         logStep(requestId, "provider_done", "completed", `${dispatchDuration}ms`, dispatchDuration);
 
-        console.log("[completions] stream done in %dms | provider=%s dispatch=%s | tokensIn=%d tokensOut=%d cost=$%s | response=%d chars",
-          dispatchDuration, decision.provider, streamDispatchInfo.dispatchMode ?? "n/a",
-          meta.tokensIn, meta.tokensOut, meta.costUsd.toFixed(4), meta.text.length);
+        console.log("[completions] ✔ STREAM DONE  latency=%dms cost=$%s tokensIn=%d tokensOut=%d",
+          dispatchDuration, meta.costUsd.toFixed(4), meta.tokensIn, meta.tokensOut);
+        console.log("════════════════════════════════════════════════════════\n");
 
         const evalResult = evaluate(meta.text, true, decision.category, decision.complexityScore);
 
@@ -475,7 +531,7 @@ export async function POST(request: NextRequest) {
         streamHeaders["x-dispatch-mode"] = streamDispatchInfo.dispatchMode;
       }
 
-      return new Response(streamResult.stream, { headers: streamHeaders });
+      return new Response(trackedStream, { headers: streamHeaders });
     } catch (err) {
       const errMsg = (err as Error).message;
       const dispatchDuration = Date.now() - dispatchStart;
@@ -489,8 +545,21 @@ export async function POST(request: NextRequest) {
       provider: decision.provider, model: decision.model, streaming: false,
     }));
 
+    // Register in active requests store for real-time activity page
+    registerRequest(requestId, {
+      requestId,
+      provider: decision.provider,
+      model: decision.alias || decision.model,
+      category: decision.category,
+      promptPreview: promptPreviewText.slice(0, 200),
+      tokensIn: 0,
+      tokensOut: 0,
+    });
+
     try {
       const result = await provider.complete(providerRequest);
+
+      completeRequest(requestId);
 
       const nonStreamDispatchInfo = getDispatchInfo();
       if (nonStreamDispatchInfo.dispatchMode) {
@@ -500,6 +569,8 @@ export async function POST(request: NextRequest) {
       }
 
       const dispatchDuration = Date.now() - dispatchStart;
+      console.log("[completions] ✔ RESPONSE DONE  latency=%dms cost=$%s tokensIn=%d tokensOut=%d chars=%d",
+        dispatchDuration, result.costUsd.toFixed(4), result.tokensIn, result.tokensOut, result.text.length);
       logStep(requestId, "provider_done", "completed", JSON.stringify({
         tokensIn: result.tokensIn, tokensOut: result.tokensOut, costUsd: result.costUsd,
         responseChars: result.text.length,
@@ -574,6 +645,7 @@ export async function POST(request: NextRequest) {
 
       logStep(requestId, "response_sent", "completed", `total=${latencyMs}ms`);
       updateRequestStatus(requestId, "completed", { httpStatus: 200, totalLatencyMs: latencyMs }).catch(() => {});
+      console.log("════════════════════════════════════════════════════════\n");
 
       const nonStreamHeaders: Record<string, string> = {
         "x-request-id": requestId,
@@ -590,6 +662,7 @@ export async function POST(request: NextRequest) {
 
       return NextResponse.json(response, { headers: nonStreamHeaders });
     } catch (err) {
+      completeRequest(requestId);
       const errMsg = (err as Error).message;
       const dispatchDuration = Date.now() - dispatchStart;
       logStep(requestId, "provider_dispatch", "error", errMsg, dispatchDuration);

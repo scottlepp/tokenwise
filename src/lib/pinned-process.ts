@@ -28,7 +28,8 @@ export function spawnClaude(model?: string, systemPrompt?: string | null): Child
     args.push("--system-prompt", systemPrompt);
   }
 
-  console.log("[claude-persistent] spawning: claude", args.join(" "));
+  console.log("[claude-persistent] spawning: claude -p - --model %s --system-prompt [%d chars]",
+    model ?? "(default)", systemPrompt?.length ?? 0);
 
   return spawn("claude", args, {
     stdio: ["pipe", "pipe", "pipe"],
