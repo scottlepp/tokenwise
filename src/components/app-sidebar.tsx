@@ -9,6 +9,7 @@ import {
   List,
   Settings,
   Zap,
+  Radio,
 } from "lucide-react";
 import {
   Sidebar,
@@ -27,6 +28,7 @@ import { Separator } from "@/components/ui/separator";
 
 const dashboardItems = [
   { title: "Overview", href: "/dashboard", icon: LayoutDashboard },
+  { title: "Activity", href: "/dashboard/activity", icon: Radio },
   { title: "Costs", href: "/dashboard/costs", icon: DollarSign },
   { title: "Performance", href: "/dashboard/performance", icon: Activity },
   { title: "Requests", href: "/dashboard/requests", icon: List },

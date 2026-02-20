@@ -127,6 +127,35 @@ export async function findTaskByPartialId(partialId: string) {
   return rows[0] ?? null;
 }
 
+
+/** Get the most recent task logs for the activity feed */
+export async function getRecentTaskLogs(limit: number) {
+  return db
+    .select({
+      id: taskLogs.id,
+      createdAt: taskLogs.createdAt,
+      provider: taskLogs.provider,
+      modelSelected: taskLogs.modelSelected,
+      taskCategory: taskLogs.taskCategory,
+      complexityScore: taskLogs.complexityScore,
+      tokensIn: taskLogs.tokensIn,
+      tokensOut: taskLogs.tokensOut,
+      costUsd: taskLogs.costUsd,
+      latencyMs: taskLogs.latencyMs,
+      streaming: taskLogs.streaming,
+      cliSuccess: taskLogs.cliSuccess,
+      heuristicScore: taskLogs.heuristicScore,
+      userRating: taskLogs.userRating,
+      promptSummary: taskLogs.promptSummary,
+      promptText: taskLogs.promptText,
+      responseText: taskLogs.responseText,
+      dispatchMode: taskLogs.dispatchMode,
+    })
+    .from(taskLogs)
+    .orderBy(desc(taskLogs.createdAt))
+    .limit(limit);
+}
+
 export async function getCostOverTime(days: number) {
   const since = daysAgo(days);
   return db

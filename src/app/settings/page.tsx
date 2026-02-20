@@ -8,10 +8,12 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Plus } from "lucide-react";
 import { ProviderCard } from "./components/provider-card";
 import { AddProviderDialog } from "./components/add-provider-dialog";
 import { BudgetSettings } from "./components/budget-settings";
+import { WarmPoolStatus } from "../dashboard/components/warm-pool-status";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -19,7 +21,13 @@ export default function SettingsPage() {
   const [providers, setProviders] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [llmClassifier, setLlmClassifier] = useState(false);
+  const [pinnedModel, setPinnedModel] = useState<string | null>(null);
   const [addProviderOpen, setAddProviderOpen] = useState(false);
+
+  /** Claude CLI models available for pinning */
+  const cliModels: { id: string; displayName: string }[] = (providers
+    .find((p: any) => p.id === "claude-cli")
+    ?.models ?? []).map((m: any) => ({ id: m.id, displayName: m.displayName }));
 
   const fetchData = useCallback(async () => {
     const [providersRes, settingsRes] = await Promise.all([
@@ -28,6 +36,7 @@ export default function SettingsPage() {
     ]);
     setProviders(providersRes.data ?? []);
     setLlmClassifier(settingsRes.data?.llmClassifierEnabled ?? false);
+    setPinnedModel(settingsRes.data?.pinnedModel ?? null);
     setLoading(false);
   }, []);
 
@@ -41,6 +50,16 @@ export default function SettingsPage() {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ llmClassifierEnabled: enabled }),
+    });
+  }
+
+  async function changePinnedModel(value: string) {
+    const model = value === "none" ? null : value;
+    setPinnedModel(model);
+    await fetch("/api/settings", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ pinnedModel: model }),
     });
   }
 
@@ -93,6 +112,40 @@ export default function SettingsPage() {
 
           <TabsContent value="general">
             <div className="max-w-lg space-y-4">
+              <WarmPoolStatus />
+
+              <Card>
+                <CardHeader>
+                  <CardTitle>Pinned Model</CardTitle>
+                  <CardDescription>
+                    Pin a single Claude CLI model to a long-lived process. All requests use this
+                    process, eliminating startup cost. Simpler than the warm pool (no context
+                    tracking, single model). Set to &quot;None&quot; to disable.
+                  </CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <div className="flex items-center justify-between">
+                    <Label>Claude CLI Model</Label>
+                    <Select
+                      value={pinnedModel ?? "none"}
+                      onValueChange={changePinnedModel}
+                    >
+                      <SelectTrigger className="w-[260px]">
+                        <SelectValue placeholder="None (disabled)" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="none">None (disabled)</SelectItem>
+                        {cliModels.map((m) => (
+                          <SelectItem key={m.id} value={m.id}>
+                            {m.displayName}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                </CardContent>
+              </Card>
+
               <Card>
                 <CardHeader>
                   <CardTitle>LLM Classifier</CardTitle>

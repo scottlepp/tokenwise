@@ -96,7 +96,7 @@ export class ClaudeCliProvider extends BaseProvider {
     return new Promise((resolve, reject) => {
       const child = spawn("claude", args, {
         stdio: [prompt.length > LONG_PROMPT_THRESHOLD ? "pipe" : "ignore", "pipe", "pipe"],
-        env: { ...process.env },
+        env: { ...process.env, CLAUDECODE: undefined },
       });
 
       if (prompt.length > LONG_PROMPT_THRESHOLD && child.stdin) {
@@ -201,7 +201,7 @@ export class ClaudeCliProvider extends BaseProvider {
 
     const child = spawn("claude", args, {
       stdio: [prompt.length > LONG_PROMPT_THRESHOLD ? "pipe" : "ignore", "pipe", "pipe"],
-      env: { ...process.env },
+      env: { ...process.env, CLAUDECODE: undefined },
     });
 
     if (prompt.length > LONG_PROMPT_THRESHOLD && child.stdin) {

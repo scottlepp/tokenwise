@@ -173,6 +173,9 @@ export interface TaskLogInsert {
   tokensAfterCompression?: number;
   cacheHit?: boolean;
   budgetRemainingUsd?: string;
+  responseText?: string;
+  promptText?: string;
+  dispatchMode?: string; // 'warm' | 'ephemeral'
 }
 
 export interface RequestLogInsert {
@@ -201,6 +204,7 @@ export type PipelineStep =
   | "provider_streaming"
   | "provider_done"
   | "tool_parse"
+  | "warm_pool_dispatch"
   | "response_sent"
   | "log_task";
 

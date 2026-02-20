@@ -1,4 +1,5 @@
 import type { ChatCompletionChunk } from "../types";
+import { RESPONSE_MODEL } from "../config";
 
 export interface StreamAccumulator {
   text: string;
@@ -21,6 +22,7 @@ export function createOllamaNdjsonTransformer(
   const decoder = new TextDecoder();
   let buffer = "";
   const accumulated: StreamAccumulator = { text: "", tokensIn: 0, tokensOut: 0, costUsd: 0 };
+  let onDoneCalled = false;
   const created = Math.floor(Date.now() / 1000);
   let sentRole = false;
 
@@ -34,7 +36,7 @@ export function createOllamaNdjsonTransformer(
       id: completionId,
       object: "chat.completion.chunk",
       created,
-      model,
+      model: RESPONSE_MODEL,
       choices: [{ index: 0, delta, finish_reason: finishReason }],
       ...(usage ? { usage } : {}),
     };
@@ -69,6 +71,17 @@ export function createOllamaNdjsonTransformer(
     }
   }
 
+
+  function callOnDone() {
+    if (onDoneCalled) return;
+    onDoneCalled = true;
+    try {
+      callOnDone();
+    } catch (err) {
+      console.error("[stream-transformer] Error in onDone callback:", err);
+    }
+  }
+
   return new TransformStream({
     transform(chunk, controller) {
       buffer += decoder.decode(chunk, { stream: true });
@@ -95,7 +108,7 @@ export function createOllamaNdjsonTransformer(
       }
 
       controller.enqueue(encoder.encode("data: [DONE]\n\n"));
-      onDone(accumulated);
+      callOnDone();
     },
   });
 }

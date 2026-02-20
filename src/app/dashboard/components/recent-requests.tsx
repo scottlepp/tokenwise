@@ -23,6 +23,7 @@ interface TaskLog {
   cacheHit: boolean | null;
   promptSummary: string | null;
   routerReason: string | null;
+  dispatchMode: string | null;
 }
 
 interface StepLog {
@@ -124,6 +125,7 @@ export function RecentRequests({
               <TableHead>Time</TableHead>
               <TableHead>Category</TableHead>
               <TableHead>Provider</TableHead>
+              <TableHead>Dispatch</TableHead>
               <TableHead>Model</TableHead>
               <TableHead>Tokens</TableHead>
               <TableHead>Cost</TableHead>
@@ -157,6 +159,17 @@ export function RecentRequests({
                     </TableCell>
                     <TableCell className="text-xs">
                       {row.provider ?? "claude-cli"}
+                    </TableCell>
+                    <TableCell>
+                      {row.dispatchMode === "warm" ? (
+                        <Badge variant="outline" className="bg-green-50 text-green-700 border-green-200 text-[10px]">Warm</Badge>
+                      ) : row.dispatchMode === "pinned" ? (
+                        <Badge variant="outline" className="bg-blue-50 text-blue-700 border-blue-200 text-[10px]">Pinned</Badge>
+                      ) : row.dispatchMode === "ephemeral" ? (
+                        <Badge variant="outline" className="bg-amber-50 text-amber-700 border-amber-200 text-[10px]">Ephemeral</Badge>
+                      ) : (
+                        <span className="text-xs text-muted-foreground">—</span>
+                      )}
                     </TableCell>
                     <TableCell>
                       <Badge>{modelLabel(row.modelSelected)}</Badge>
@@ -202,7 +215,7 @@ export function RecentRequests({
                   </TableRow>
                   {isExpanded && detail && (
                     <TableRow key={`${row.id}-detail`}>
-                      <TableCell colSpan={detailed ? 11 : 10} className="bg-muted/30 p-3">
+                      <TableCell colSpan={detailed ? 12 : 11} className="bg-muted/30 p-3">
                         <div className="space-y-2">
                           <div className="flex gap-4 text-xs text-muted-foreground">
                             <span>Request: <code className="text-[10px]">{detail.id.slice(0, 8)}</code></span>

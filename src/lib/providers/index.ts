@@ -72,7 +72,7 @@ export const providerRegistry = new ProviderRegistry();
 let initialized = false;
 
 /** Load models from DB for a given provider */
-async function loadModelsForProvider(providerId: string): Promise<ProviderModel[]> {
+export async function loadModelsForProvider(providerId: string): Promise<ProviderModel[]> {
   const rows = await db
     .select()
     .from(modelsTable)
@@ -149,8 +149,29 @@ export async function initializeProviders(): Promise<void> {
 /** Re-initialize providers after config changes (e.g., adding/removing providers via UI) */
 export async function reinitializeProviders(): Promise<void> {
   console.log("[registry] Reinitializing providers...");
+
+  // Check if warm pool was running before reinit
+  let warmPoolWasRunning = false;
+  try {
+    const { warmPool } = await import("../warm-pool");
+    warmPoolWasRunning = warmPool.getStatus().running;
+    if (warmPoolWasRunning) {
+      await warmPool.stop();
+    }
+  } catch { /* warm pool not available */ }
+
   providerRegistry.clear();
   await loadAndRegisterProviders();
+
+  // Restart warm pool if it was running
+  if (warmPoolWasRunning) {
+    try {
+      const { warmPool } = await import("../warm-pool");
+      await warmPool.start();
+    } catch (err) {
+      console.error("[registry] Failed to restart warm pool:", (err as Error).message);
+    }
+  }
 }
 
 /** Core logic: load provider configs from DB and register each one */
@@ -166,10 +187,28 @@ async function loadAndRegisterProviders(): Promise<void> {
     try {
       if (providerId === "claude-cli") {
         const models = await loadModelsForProvider("claude-cli");
-        const { ClaudeCliProvider } = await import("./claude-cli");
-        const cliProvider = new ClaudeCliProvider(models);
-        if (cliProvider.isAvailable()) {
-          providerRegistry.register(cliProvider);
+        // Use persistent subprocess provider (--input-format stream-json)
+        // Falls back to spawn-per-request if CLAUDE_CLI_LEGACY=1
+        if (process.env.CLAUDE_CLI_LEGACY === "1") {
+          const { ClaudeCliProvider } = await import("./claude-cli");
+          const cliProvider = new ClaudeCliProvider(models);
+          if (cliProvider.isAvailable()) {
+            providerRegistry.register(cliProvider);
+          }
+        } else {
+          const { ClaudeCliPersistentProvider } = await import("./claude-cli-persistent");
+          const cliProvider = new ClaudeCliPersistentProvider(models);
+          if (cliProvider.isAvailable()) {
+            providerRegistry.register(cliProvider);
+
+            // Auto-start warm pool if configured
+            if (process.env.WARM_POOL_AUTO_START === "1") {
+              const { warmPool } = await import("../warm-pool");
+              warmPool.start().catch((err) => {
+                console.error("[registry] Failed to auto-start warm pool:", err.message);
+              });
+            }
+          }
         }
       } else if (providerId === "claude-api") {
         const apiKey = getApiKey(configMap.get("claude-api"), "ANTHROPIC_API_KEY");

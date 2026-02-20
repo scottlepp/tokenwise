@@ -1,6 +1,10 @@
 import type { ClaudeModel } from "./types";
 import type { ModelTier } from "./providers/base";
 
+// Model name reported to clients in all responses (streaming + non-streaming).
+// Keeps agentic clients like Cline happy — they check for "capable" model names.
+export const RESPONSE_MODEL = "claude-sonnet-4-5-20250929";
+
 // ── Legacy Claude-only mappings (kept for backward compatibility) ──
 
 export const MODEL_MAP: Record<string, ClaudeModel> = {
