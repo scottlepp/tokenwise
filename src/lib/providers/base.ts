@@ -29,6 +29,7 @@ export interface ProviderRequest {
   systemPrompt?: string | null;
   stream: boolean;
   tools?: ToolDefinition[];
+  toolChoice?: string | { type: string; function?: { name: string } };
   temperature?: number;
   maxTokens?: number;
 }

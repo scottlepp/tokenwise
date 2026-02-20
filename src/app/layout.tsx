@@ -30,7 +30,7 @@ export default function RootLayout({
       <body
         className={`${geistSans.variable} ${geistMono.variable} antialiased`}
       >
-        <SidebarProvider>
+        <SidebarProvider className="overflow-x-hidden">
           <Suspense>
             <AppSidebar />
           </Suspense>

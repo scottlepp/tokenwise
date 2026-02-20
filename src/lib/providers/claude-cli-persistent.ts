@@ -114,16 +114,24 @@ export class ClaudeCliPersistentProvider extends BaseProvider {
   }
 
   async complete(params: ProviderRequest): Promise<ProviderResponse> {
-    const { systemPrompt, prompt, hasTools } = convertMessages(params.messages, params.tools);
+    const { systemPrompt, prompt, hasTools } = convertMessages(params.messages, params.tools, params.toolChoice);
     const effectiveSystemPrompt = params.systemPrompt ?? systemPrompt;
+
+    // For warm pool and pinned modes, the process was spawned without the request's
+    // system prompt. Prepend it to the user message so the model sees client instructions
+    // (e.g., Cline's XML tool protocol). Ephemeral mode passes it via --system-prompt.
+    const promptWithSystem = effectiveSystemPrompt
+      ? `${effectiveSystemPrompt}\n\n---\n\n${prompt}`
+      : prompt;
     const userMsg = buildUserMessage(prompt);
+    const userMsgWithSystem = buildUserMessage(promptWithSystem);
 
     // 1. Try warm pool first
     const warmResult = warmPool.getProcessWithContext(params.model, params.messages);
     if (warmResult) {
       const { process: wp, delta } = warmResult;
       console.log("[claude-persistent] non-streaming request via warm pool, model=%s prompt=%d chars backfill=%d msgs",
-        params.model, prompt.length, delta.length);
+        params.model, promptWithSystem.length, delta.length);
       this._lastDispatchMode = "warm";
       this._lastContextBackfillCount = delta.length;
       warmPool.resetIdleTimer();
@@ -132,20 +140,20 @@ export class ClaudeCliPersistentProvider extends BaseProvider {
         await this.backfillContext(wp.process, delta);
       }
 
-      return this.completePinned(wp.process, userMsg, hasTools);
+      return this.completePinned(wp.process, userMsgWithSystem, hasTools);
     }
 
     // 2. Try pinned process (single model, no context tracking)
     const pinned = this.getPinnedProcess();
     if (pinned) {
       console.log("[claude-persistent] non-streaming request via pinned process, model=%s prompt=%d chars",
-        getPinnedModel(), prompt.length);
+        getPinnedModel(), promptWithSystem.length);
       this._lastDispatchMode = "pinned";
       this._lastContextBackfillCount = 0;
-      return this.completePinned(pinned, userMsg, hasTools);
+      return this.completePinned(pinned, userMsgWithSystem, hasTools);
     }
 
-    // 3. Ephemeral fallback
+    // 3. Ephemeral fallback — system prompt passed via --system-prompt flag
     console.log("[claude-persistent] non-streaming request via ephemeral, model=%s prompt=%d chars",
       params.model, prompt.length);
     this._lastDispatchMode = "ephemeral";
@@ -357,16 +365,23 @@ export class ClaudeCliPersistentProvider extends BaseProvider {
   }
 
   async stream(params: ProviderRequest): Promise<ProviderStreamResponse> {
-    const { systemPrompt, prompt, hasTools } = convertMessages(params.messages, params.tools);
+    const { systemPrompt, prompt, hasTools } = convertMessages(params.messages, params.tools, params.toolChoice);
     const effectiveSystemPrompt = params.systemPrompt ?? systemPrompt;
+
+    // For warm pool and pinned modes, prepend system prompt to user message
+    // (process was spawned without the request's system prompt)
+    const promptWithSystem = effectiveSystemPrompt
+      ? `${effectiveSystemPrompt}\n\n---\n\n${prompt}`
+      : prompt;
     const userMsg = buildUserMessage(prompt);
+    const userMsgWithSystem = buildUserMessage(promptWithSystem);
 
     // Try warm pool first
     const warmResult = warmPool.getProcessWithContext(params.model, params.messages);
     if (warmResult) {
       const { process: wp, delta } = warmResult;
       console.log("[claude-persistent] streaming request via warm pool, model=%s prompt=%d chars backfill=%d msgs",
-        params.model, prompt.length, delta.length);
+        params.model, promptWithSystem.length, delta.length);
       this._lastDispatchMode = "warm";
       this._lastContextBackfillCount = delta.length;
       warmPool.resetIdleTimer();
@@ -376,20 +391,20 @@ export class ClaudeCliPersistentProvider extends BaseProvider {
         await this.backfillContext(wp.process, delta);
       }
 
-      return this.streamPinned(wp.process, params.model, userMsg, hasTools);
+      return this.streamPinned(wp.process, params.model, userMsgWithSystem, hasTools);
     }
 
     // 2. Try pinned process
     const pinnedStream = this.getPinnedProcess();
     if (pinnedStream) {
       console.log("[claude-persistent] streaming request via pinned process, model=%s prompt=%d chars",
-        getPinnedModel(), prompt.length);
+        getPinnedModel(), promptWithSystem.length);
       this._lastDispatchMode = "pinned";
       this._lastContextBackfillCount = 0;
-      return this.streamPinned(pinnedStream, params.model, userMsg, hasTools);
+      return this.streamPinned(pinnedStream, params.model, userMsgWithSystem, hasTools);
     }
 
-    // 3. Ephemeral fallback
+    // 3. Ephemeral fallback — system prompt passed via --system-prompt flag
     console.log("[claude-persistent] streaming request via ephemeral, model=%s prompt=%d chars",
       params.model, prompt.length);
     this._lastDispatchMode = "ephemeral";

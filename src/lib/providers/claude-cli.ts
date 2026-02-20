@@ -87,7 +87,7 @@ export class ClaudeCliProvider extends BaseProvider {
   }
 
   async complete(params: ProviderRequest): Promise<ProviderResponse> {
-    const { systemPrompt, prompt, hasTools } = convertMessages(params.messages, params.tools);
+    const { systemPrompt, prompt, hasTools } = convertMessages(params.messages, params.tools, params.toolChoice);
     const effectiveSystemPrompt = params.systemPrompt ?? systemPrompt;
     const args = buildArgs(params.model, prompt, effectiveSystemPrompt, false);
 
@@ -193,7 +193,7 @@ export class ClaudeCliProvider extends BaseProvider {
   }
 
   async stream(params: ProviderRequest): Promise<ProviderStreamResponse> {
-    const { systemPrompt, prompt, hasTools } = convertMessages(params.messages, params.tools);
+    const { systemPrompt, prompt, hasTools } = convertMessages(params.messages, params.tools, params.toolChoice);
     const effectiveSystemPrompt = params.systemPrompt ?? systemPrompt;
     const args = buildArgs(params.model, prompt, effectiveSystemPrompt, true);
 

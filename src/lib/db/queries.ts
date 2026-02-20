@@ -1,5 +1,5 @@
 import { db } from ".";
-import { taskLogs, requestLogs, statusLogs, budgetConfig } from "./schema";
+import { taskLogs, requestLogs, statusLogs, budgetConfig, modelsTable } from "./schema";
 import { desc, sql, gte, eq, and, inArray } from "drizzle-orm";
 import type { TaskLogInsert, RequestLogInsert, StatusLogInsert } from "../types";
 
@@ -128,12 +128,13 @@ export async function findTaskByPartialId(partialId: string) {
 }
 
 
-/** Get the most recent task logs for the activity feed */
+/** Get the most recent task logs for the activity feed, including requestId for step lookup */
 export async function getRecentTaskLogs(limit: number) {
   return db
     .select({
       id: taskLogs.id,
       createdAt: taskLogs.createdAt,
+      requestId: taskLogs.requestId,
       provider: taskLogs.provider,
       modelSelected: taskLogs.modelSelected,
       taskCategory: taskLogs.taskCategory,
@@ -154,6 +155,54 @@ export async function getRecentTaskLogs(limit: number) {
     .from(taskLogs)
     .orderBy(desc(taskLogs.createdAt))
     .limit(limit);
+}
+
+/** Get recent task logs with their pipeline steps and request metadata for the activity feed */
+export async function getActivityFeed(limit: number) {
+  const tasks = await getRecentTaskLogs(limit);
+  if (tasks.length === 0) return [];
+
+  const requestIds = tasks.map((t) => t.requestId).filter(Boolean) as string[];
+
+  const [steps, requests] = await Promise.all([
+    requestIds.length > 0
+      ? db
+          .select()
+          .from(statusLogs)
+          .where(inArray(statusLogs.requestId, requestIds))
+          .orderBy(statusLogs.createdAt)
+      : Promise.resolve([]),
+    requestIds.length > 0
+      ? db
+          .select({
+            id: requestLogs.id,
+            status: requestLogs.status,
+            promptPreview: requestLogs.promptPreview,
+            messageCount: requestLogs.messageCount,
+            toolCount: requestLogs.toolCount,
+            totalLatencyMs: requestLogs.totalLatencyMs,
+            userAgent: requestLogs.userAgent,
+          })
+          .from(requestLogs)
+          .where(inArray(requestLogs.id, requestIds))
+      : Promise.resolve([]),
+  ]);
+
+  const stepMap = new Map<string, typeof steps>();
+  for (const s of steps) {
+    const list = stepMap.get(s.requestId) ?? [];
+    list.push(s);
+    stepMap.set(s.requestId, list);
+  }
+
+  const requestMap = new Map<string, typeof requests[0]>();
+  for (const r of requests) requestMap.set(r.id, r);
+
+  return tasks.map((t) => ({
+    ...t,
+    steps: t.requestId ? (stepMap.get(t.requestId) ?? []) : [],
+    request: t.requestId ? (requestMap.get(t.requestId) ?? null) : null,
+  }));
 }
 
 export async function getCostOverTime(days: number) {
@@ -275,8 +324,42 @@ export async function getProviderComparison(days: number) {
 
 export async function getRecentRequests(limit: number, offset: number) {
   return db
-    .select()
+    .select({
+      id: taskLogs.id,
+      createdAt: taskLogs.createdAt,
+      requestId: taskLogs.requestId,
+      taskCategory: taskLogs.taskCategory,
+      complexityScore: taskLogs.complexityScore,
+      promptSummary: taskLogs.promptSummary,
+      messageCount: taskLogs.messageCount,
+      provider: taskLogs.provider,
+      modelRequested: taskLogs.modelRequested,
+      modelSelected: taskLogs.modelSelected,
+      modelDisplayName: modelsTable.displayName,
+      routerReason: taskLogs.routerReason,
+      tokensIn: taskLogs.tokensIn,
+      tokensOut: taskLogs.tokensOut,
+      costUsd: taskLogs.costUsd,
+      latencyMs: taskLogs.latencyMs,
+      streaming: taskLogs.streaming,
+      tokensBeforeCompression: taskLogs.tokensBeforeCompression,
+      tokensAfterCompression: taskLogs.tokensAfterCompression,
+      cacheHit: taskLogs.cacheHit,
+      budgetRemainingUsd: taskLogs.budgetRemainingUsd,
+      dispatchMode: taskLogs.dispatchMode,
+      cliSuccess: taskLogs.cliSuccess,
+      heuristicScore: taskLogs.heuristicScore,
+      userRating: taskLogs.userRating,
+      errorMessage: taskLogs.errorMessage,
+    })
     .from(taskLogs)
+    .leftJoin(
+      modelsTable,
+      and(
+        eq(modelsTable.providerId, taskLogs.provider),
+        eq(modelsTable.modelId, taskLogs.modelSelected)
+      )
+    )
     .orderBy(desc(taskLogs.createdAt))
     .limit(limit)
     .offset(offset);
