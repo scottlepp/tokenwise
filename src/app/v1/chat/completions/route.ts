@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { selectModel } from "@/lib/router";
 import { evaluate } from "@/lib/success-evaluator";
-import { modelAlias } from "@/lib/config";
+import { modelAlias, RESPONSE_MODEL } from "@/lib/config";
 import {
   insertTaskLog, insertRequestLog, insertStatusLog, updateRequestStatus,
   updateUserRating, getMostRecentTaskId, findTaskByPartialId,
@@ -11,9 +11,14 @@ import { compress } from "@/lib/compressor";
 import { checkBudget, downgradeModel } from "@/lib/budget";
 import { providerRegistry, initializeProviders } from "@/lib/providers";
 import type { ChatCompletionRequest, ChatCompletionResponse, PipelineStep } from "@/lib/types";
+import { registerRequest, completeRequest, updateTokens } from "@/lib/active-requests";
+import type { ClaudeCliPersistentProvider } from "@/lib/providers/claude-cli-persistent";
 
-// Always report this model in responses — keeps clients like Cline happy
-const RESPONSE_MODEL = "claude-sonnet-4-5-20250929";
+// RESPONSE_MODEL is imported from @/lib/config — keeps clients like Cline happy
+
+// Force Node.js runtime + no static optimization — required for streaming
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
 /** Log a pipeline step. Fire-and-forget — never blocks the pipeline on logging failures. */
 function logStep(
@@ -24,6 +29,20 @@ function logStep(
   durationMs?: number,
 ) {
   insertStatusLog({ requestId, step, status, detail, durationMs }).catch(() => {});
+}
+
+
+/**
+ * Wraps a promise with a timeout. If the promise doesn't resolve within the timeout,
+ * rejects with a TimeoutError.
+ */
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, context: string): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) =>
+      setTimeout(() => reject(new Error(`[${context}] Promise timeout after ${timeoutMs}ms`)), timeoutMs)
+    ),
+  ]);
 }
 
 function errorResponse(message: string, code: string, status: number) {
@@ -334,6 +353,17 @@ export async function POST(request: NextRequest) {
     stream: streaming,
   };
 
+  // Helper to get dispatch mode after provider call completes
+  const getDispatchInfo = () => {
+    if (decision.provider === "claude-cli" && "getLastDispatchMode" in provider) {
+      const cliProvider = provider as unknown as ClaudeCliPersistentProvider;
+      const mode = cliProvider.getLastDispatchMode();
+      const backfillCount = cliProvider.getLastContextBackfillCount();
+      return { dispatchMode: mode, backfillCount };
+    }
+    return { dispatchMode: undefined, backfillCount: 0 };
+  };
+
   if (streaming) {
     // ── Streaming path ──
     logStep(requestId, "provider_dispatch", "started", JSON.stringify({
@@ -345,8 +375,31 @@ export async function POST(request: NextRequest) {
 
       logStep(requestId, "provider_streaming", "started");
 
+      // Register in active requests store for real-time activity page
+      registerRequest(requestId, {
+        requestId,
+        provider: decision.provider,
+        model: decision.alias || decision.model,
+        category: decision.category,
+        promptPreview: lastUserText.slice(0, 200),
+        tokensIn: 0,
+        tokensOut: 0,
+      });
+
       // Log asynchronously after stream completes
-      streamResult.metadata.then(async (meta) => {
+      // Capture dispatch info right after the provider call (before async metadata)
+      const streamDispatchInfo = getDispatchInfo();
+      if (streamDispatchInfo.dispatchMode) {
+        logStep(requestId, "warm_pool_dispatch", "completed", JSON.stringify({
+          mode: streamDispatchInfo.dispatchMode, model: decision.model, backfill: streamDispatchInfo.backfillCount,
+        }));
+      }
+
+      // Wrap metadata promise with timeout to prevent stuck requests
+      withTimeout(streamResult.metadata, 120_000, `stream-metadata-${requestId}`)
+        .then(async (meta) => {
+          completeRequest(requestId);
+        updateTokens(requestId, meta.tokensIn, meta.tokensOut);
         const dispatchDuration = Date.now() - dispatchStart;
         const totalLatency = Date.now() - requestStart;
 
@@ -355,8 +408,9 @@ export async function POST(request: NextRequest) {
         }), dispatchDuration);
         logStep(requestId, "provider_done", "completed", `${dispatchDuration}ms`, dispatchDuration);
 
-        console.log("[completions] stream done in %dms | provider=%s | tokensIn=%d tokensOut=%d cost=$%s | response=%d chars",
-          dispatchDuration, decision.provider, meta.tokensIn, meta.tokensOut, meta.costUsd.toFixed(4), meta.text.length);
+        console.log("[completions] stream done in %dms | provider=%s dispatch=%s | tokensIn=%d tokensOut=%d cost=$%s | response=%d chars",
+          dispatchDuration, decision.provider, streamDispatchInfo.dispatchMode ?? "n/a",
+          meta.tokensIn, meta.tokensOut, meta.costUsd.toFixed(4), meta.text.length);
 
         const evalResult = evaluate(meta.text, true, decision.category, decision.complexityScore);
 
@@ -381,6 +435,9 @@ export async function POST(request: NextRequest) {
             tokensBeforeCompression: compressionResult.tokensBefore,
             tokensAfterCompression: compressionResult.tokensAfter,
             budgetRemainingUsd: budgetResult.remainingUsd === Infinity ? undefined : budgetResult.remainingUsd.toFixed(2),
+            responseText: meta.text,
+            promptText: lastUserText,
+            dispatchMode: streamDispatchInfo.dispatchMode,
           });
           logStep(requestId, "log_task", "completed");
         } catch (err) {
@@ -390,21 +447,35 @@ export async function POST(request: NextRequest) {
 
         logStep(requestId, "response_sent", "completed", `total=${totalLatency}ms`);
         updateRequestStatus(requestId, "completed", { httpStatus: 200, totalLatencyMs: totalLatency }).catch(() => {});
-      });
+        })
+        .catch((err) => {
+          completeRequest(requestId);
+          console.error("[completions] Stream metadata error:", err);
+          logStep(requestId, "provider_streaming", "error", (err as Error).message);
+          updateRequestStatus(requestId, "error", { 
+            httpStatus: 500, 
+            errorMessage: (err as Error).message, 
+            totalLatencyMs: Date.now() - requestStart 
+          }).catch(() => {});
+        });
 
-      return new Response(streamResult.stream, {
-        headers: {
-          "Content-Type": "text/event-stream",
-          "Cache-Control": "no-cache",
-          Connection: "keep-alive",
-          "x-request-id": requestId,
-          "x-task-id": requestId,
-          "x-provider": decision.provider,
-          "x-model": decision.alias,
-          "x-router-reason": decision.reason,
-          "x-tokens-saved": String(tokensSaved),
-        },
-      });
+      const streamHeaders: Record<string, string> = {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache, no-transform",
+        Connection: "keep-alive",
+        "X-Accel-Buffering": "no",
+        "x-request-id": requestId,
+        "x-task-id": requestId,
+        "x-provider": decision.provider,
+        "x-model": decision.alias,
+        "x-router-reason": decision.reason,
+        "x-tokens-saved": String(tokensSaved),
+      };
+      if (streamDispatchInfo.dispatchMode) {
+        streamHeaders["x-dispatch-mode"] = streamDispatchInfo.dispatchMode;
+      }
+
+      return new Response(streamResult.stream, { headers: streamHeaders });
     } catch (err) {
       const errMsg = (err as Error).message;
       const dispatchDuration = Date.now() - dispatchStart;
@@ -420,6 +491,13 @@ export async function POST(request: NextRequest) {
 
     try {
       const result = await provider.complete(providerRequest);
+
+      const nonStreamDispatchInfo = getDispatchInfo();
+      if (nonStreamDispatchInfo.dispatchMode) {
+        logStep(requestId, "warm_pool_dispatch", "completed", JSON.stringify({
+          mode: nonStreamDispatchInfo.dispatchMode, model: decision.model, backfill: nonStreamDispatchInfo.backfillCount,
+        }));
+      }
 
       const dispatchDuration = Date.now() - dispatchStart;
       logStep(requestId, "provider_done", "completed", JSON.stringify({
@@ -453,6 +531,9 @@ export async function POST(request: NextRequest) {
           tokensBeforeCompression: compressionResult.tokensBefore,
           tokensAfterCompression: compressionResult.tokensAfter,
           budgetRemainingUsd: budgetResult.remainingUsd === Infinity ? undefined : budgetResult.remainingUsd.toFixed(2),
+          responseText: result.text,
+          promptText: lastUserText,
+          dispatchMode: nonStreamDispatchInfo.dispatchMode,
         });
         logStep(requestId, "log_task", "completed");
       } catch (err) {
@@ -494,17 +575,20 @@ export async function POST(request: NextRequest) {
       logStep(requestId, "response_sent", "completed", `total=${latencyMs}ms`);
       updateRequestStatus(requestId, "completed", { httpStatus: 200, totalLatencyMs: latencyMs }).catch(() => {});
 
-      return NextResponse.json(response, {
-        headers: {
-          "x-request-id": requestId,
-          "x-task-id": loggedTaskId,
-          "x-provider": decision.provider,
-          "x-model": decision.alias,
-          "x-router-reason": decision.reason,
-          "x-tokens-saved": String(tokensSaved),
-          "x-cache-hit": "false",
-        },
-      });
+      const nonStreamHeaders: Record<string, string> = {
+        "x-request-id": requestId,
+        "x-task-id": loggedTaskId,
+        "x-provider": decision.provider,
+        "x-model": decision.alias,
+        "x-router-reason": decision.reason,
+        "x-tokens-saved": String(tokensSaved),
+        "x-cache-hit": "false",
+      };
+      if (nonStreamDispatchInfo.dispatchMode) {
+        nonStreamHeaders["x-dispatch-mode"] = nonStreamDispatchInfo.dispatchMode;
+      }
+
+      return NextResponse.json(response, { headers: nonStreamHeaders });
     } catch (err) {
       const errMsg = (err as Error).message;
       const dispatchDuration = Date.now() - dispatchStart;

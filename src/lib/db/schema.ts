@@ -84,6 +84,13 @@ export const taskLogs = pgTable(
     cacheHit: boolean("cache_hit").default(false),
     budgetRemainingUsd: numeric("budget_remaining_usd", { precision: 10, scale: 2 }),
 
+    // Full text storage
+    promptText: text("prompt_text"),
+    responseText: text("response_text"),
+
+    // Dispatch mode (warm pool vs ephemeral)
+    dispatchMode: varchar("dispatch_mode", { length: 20 }),
+
     // Success tracking
     cliSuccess: boolean("cli_success").notNull().default(true),
     heuristicScore: integer("heuristic_score"),

@@ -1,4 +1,5 @@
 import type { ChatCompletionChunk } from "../types";
+import { RESPONSE_MODEL } from "../config";
 
 export interface StreamAccumulator {
   text: string;
@@ -23,6 +24,7 @@ export function createAnthropicSseTransformer(
   const decoder = new TextDecoder();
   let buffer = "";
   const accumulated: StreamAccumulator = { text: "", tokensIn: 0, tokensOut: 0, costUsd: 0 };
+  let onDoneCalled = false;
   const created = Math.floor(Date.now() / 1000);
   let sentRole = false;
   let sentStop = false;
@@ -40,7 +42,7 @@ export function createAnthropicSseTransformer(
       id: completionId,
       object: "chat.completion.chunk",
       created,
-      model,
+      model: RESPONSE_MODEL,
       choices: [{ index: 0, delta, finish_reason: finishReason }],
       ...(usage ? { usage } : {}),
     };
@@ -82,6 +84,17 @@ export function createAnthropicSseTransformer(
       emit(controller, {}, finishReason, usageObj);
     }
     // message_stop and content_block_start/stop are ignored
+  }
+
+
+  function callOnDone() {
+    if (onDoneCalled) return;
+    onDoneCalled = true;
+    try {
+      callOnDone();
+    } catch (err) {
+      console.error("[stream-transformer] Error in onDone callback:", err);
+    }
   }
 
   return new TransformStream({
@@ -133,7 +146,7 @@ export function createAnthropicSseTransformer(
       }
 
       controller.enqueue(encoder.encode("data: [DONE]\n\n"));
-      onDone(accumulated);
+      callOnDone();
     },
   });
 }

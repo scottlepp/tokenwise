@@ -1,5 +1,6 @@
 import type { ChatCompletionChunk } from "../types";
 import { parseToolCalls } from "../tool-parser";
+import { RESPONSE_MODEL } from "../config";
 
 export interface StreamAccumulator {
   text: string;
@@ -22,6 +23,7 @@ export function createClaudeNdjsonTransformer(
   let sentRole = false;
   let sentStop = false;
   let gotResult = false;
+  let onDoneCalled = false;
 
   function emit(
     controller: TransformStreamDefaultController<Uint8Array>,
@@ -36,7 +38,7 @@ export function createClaudeNdjsonTransformer(
       id: completionId,
       object: "chat.completion.chunk",
       created,
-      model,
+      model: RESPONSE_MODEL,
       choices: [{ index: 0, delta, finish_reason: finishReason }],
       ...(usage ? { usage } : {}),
     };
@@ -148,6 +150,17 @@ export function createClaudeNdjsonTransformer(
     }
   }
 
+
+  function callOnDone() {
+    if (onDoneCalled) return;
+    onDoneCalled = true;
+    try {
+      onDone(accumulated);
+    } catch (err) {
+      console.error("[claude-ndjson] Error in onDone callback:", err);
+    }
+  }
+
   return new TransformStream({
     transform(chunk, controller) {
       buffer += decoder.decode(chunk, { stream: true });
@@ -219,7 +232,9 @@ export function createClaudeNdjsonTransformer(
       }
 
       controller.enqueue(encoder.encode("data: [DONE]\n\n"));
-      onDone(accumulated);
+
+      // Always call onDone to ensure metadata promise resolves
+      callOnDone();
     },
   });
 }

@@ -2,13 +2,13 @@ import { NextRequest, NextResponse } from "next/server";
 import { providerRegistry, initializeProviders, reinitializeProviders, isBuiltinProvider } from "@/lib/providers";
 import { db } from "@/lib/db";
 import { providerConfig, modelsTable } from "@/lib/db/schema";
-import { eq } from "drizzle-orm";
+import { eq, desc } from "drizzle-orm";
 
 export async function GET() {
   await initializeProviders();
 
   // Return ALL providers from DB (not just registered ones)
-  const dbProviders = await db.select().from(providerConfig);
+  const dbProviders = await db.select().from(providerConfig).orderBy(desc(providerConfig.priority));
   const allModels = await db.select().from(modelsTable);
 
   const providers = dbProviders.map((p) => {
